@@ -16,7 +16,7 @@ Both models are trained using PyTorch and exported to ONNX format for integratio
 All required plugin dependencies are located in the `plugins_server` folder and are meant to be used with a local PaperMC server.
 
 - Your model `.onnx` and `.json` files should be placed in:
-  C:\Users\path_to_server\Server\plugins\GenerativeTerrain
+  `C:\Users\path_to_server\Server\plugins\GenerativeTerrain`
 
 - For Java integration, use Maven to install dependencies such as the ONNX Runtime.
 - The plugin requires JSON mappings to decode ONNX model outputs into Minecraft block structures. These are provided in the repo.
