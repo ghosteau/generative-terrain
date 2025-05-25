@@ -27,7 +27,7 @@ All required plugin dependencies are located in the `plugins_server` folder and 
 
 - Training notebooks are provided in this repository.
 - Data was extracted directly from Minecraft using a custom `/grabchunkdata` and `/setdatapath`command (also included in the plugin if you want to use it on your own!).
-- A full dataset will be uploaded to Kaggle when the project is finalized.
+- A full dataset will be uploaded to Kaggle and/or Hugging Face along with the models when the project is finalized.
 
 ## Commands:
 - You can set your data path (relative to your server file) using: `/setdatapath`
