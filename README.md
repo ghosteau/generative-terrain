@@ -21,6 +21,7 @@ All required plugin dependencies are located in the `plugins_server` folder and 
 
 - For Java integration, use Maven to install dependencies such as the ONNX Runtime.
 - The plugin requires JSON mappings to decode ONNX model outputs into Minecraft block structures. These are provided in the repo.
+- Make sure in your `C:\Users\path_to_server\Server\plugins\` directory that there is a `GenerativeTerrain.jar` file (NOT the directory I mentioned earlier) which should be generated via Maven when you run the Maven install process on the project from you Java IDE.
 
 ## Model Training
 
