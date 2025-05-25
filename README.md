@@ -24,7 +24,7 @@ All required plugin dependencies are located in the `plugins_server` folder and 
 ## Model Training
 
 - Training notebooks are provided in this repository.
-- Data was extracted directly from Minecraft using a custom `/extractdata` command (also included in the plugin).
+- Data was extracted directly from Minecraft using a custom `/grabchunkdata` and `/setdatapath`command (also included in the plugin if you want to use it on your own!).
 - A full dataset will be uploaded to Kaggle when the project is finalized.
 
 ## Data Features
