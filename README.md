@@ -8,6 +8,7 @@ Two model types have been developed so far:
 
 - CNN-based model — A 3D convolutional neural network trained on structured block data.
 - Transformer-based model — A transformer architecture designed to learn spatial relationships across block positions.
+- You can choose which model you want by simply modifying the private final variable "model" in `modelGenerateTerrain.java`
 
 Both models are trained using PyTorch and exported to ONNX format for integration into a Java-based Minecraft plugin.
 
