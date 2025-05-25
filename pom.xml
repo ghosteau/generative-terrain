@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>com.ghosteau</groupId>
+    <artifactId>GenerativeTerrain</artifactId>
+    <version>1.0-SNAPSHOT</version>
+
+    <properties>
+        <maven.compiler.source>17</maven.compiler.source>
+        <maven.compiler.target>17</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    </properties>
+
+    <repositories>
+        <repository>
+            <id>papermc</id>
+            <url>https://repo.papermc.io/repository/maven-public/</url>
+        </repository>
+    </repositories>
+
+    <dependencies>
+        <dependency>
+            <groupId>io.papermc.paper</groupId>
+            <artifactId>paper-api</artifactId>
+            <version>1.21.5-R0.1-SNAPSHOT</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.microsoft.onnxruntime</groupId>
+            <artifactId>onnxruntime</artifactId>
+            <version>1.15.0</version>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <finalName>GenerativeTerrain</finalName>
+        <plugins>
+            <!-- Maven Assembly Plugin -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-assembly-plugin</artifactId>
+                <version>3.4.2</version>
+                <executions>
+                    <execution>
+                        <id>make-assembly</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>single</goal>
+                        </goals>
+                        <configuration>
+                            <descriptorRefs>
+                                <descriptorRef>jar-with-dependencies</descriptorRef>
+                            </descriptorRefs>
+                            <archive>
+                                <manifest>
+                                    <mainClass>com.ghosteau.generativeterrain.GenerativeTerrain</mainClass>
+                                </manifest>
+                            </archive>
+                            <finalName>GenerativeTerrain</finalName>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <!-- Copy to plugin directory -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-antrun-plugin</artifactId>
+                <version>3.1.0</version>
+                <executions>
+                    <execution>
+                        <id>copy-jar</id>
+                        <phase>install</phase>
+                        <configuration>
+                            <target>
+                                <copy file="${project.build.directory}/GenerativeTerrain-jar-with-dependencies.jar"
+                                      tofile="C:/Users/cathe/Desktop/Plugins/Server/plugins/GenerativeTerrain.jar"
+                                      overwrite="true"/>
+                            </target>
+                        </configuration>
+                        <goals>
+                            <goal>run</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

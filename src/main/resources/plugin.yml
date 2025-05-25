@@ -1,0 +1,34 @@
+name: GenerativeTerrain
+version: '1.0-SNAPSHOT'
+main: com.ghosteau.generativeterrain.GenerativeTerrain
+api-version: '1.21'
+authors: [Ghosteau]
+description: A plugin for chunk data harvesting and generating AI-based terrain in Minecraft
+
+permissions:
+  generativeterrain.grabchunkdata:
+    description: Allows the player to grab chunk data
+    default: op
+  generativeterrain.setdatapath:
+    description: Allows the player to set the data path
+    default: op
+  generativeterrain.generateterrain:
+    description: Allows the player to generate terrain using the ML model
+    default: op
+
+commands:
+  grabChunkData:
+    description: Grabs all environment data in a player's current chunk and exports it to a CSV file format.
+    usage: /<command>
+    permission: generativeterrain.grabchunkdata
+    permission-message: You don't have permission to use this command.
+  setDataPath:
+    description: Sets the path in which you want to export chunk CSV data to via grabChunkData command.
+    usage: /<command> <path>
+    permission: generativeterrain.setdatapath
+    permission-message: You don't have permission to use this command.
+  generateTerrain:
+    description: Generates terrain in a chunk using the ML model.
+    usage: /<command> [chunkX chunkZ]
+    permission: generativeterrain.generateterrain
+    permission-message: You don't have permission to use this command.
