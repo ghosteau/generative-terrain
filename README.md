@@ -29,6 +29,11 @@ All required plugin dependencies are located in the `plugins_server` folder and 
 - Data was extracted directly from Minecraft using a custom `/grabchunkdata` and `/setdatapath`command (also included in the plugin if you want to use it on your own!).
 - A full dataset will be uploaded to Kaggle when the project is finalized.
 
+## Commands:
+- You can set your data path (relative to your server file) using `/setdatapath`
+- After you set the data path, you can grab the current chunk you are on using `/grabchunkdata`
+- If you want to generate terrain for the chunk you are on, use `/modelgenerateterrain`
+
 ## Data Features
 
 The dataset used for training includes the following features per block:
