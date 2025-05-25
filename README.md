@@ -30,8 +30,8 @@ All required plugin dependencies are located in the `plugins_server` folder and 
 - A full dataset will be uploaded to Kaggle when the project is finalized.
 
 ## Commands:
-- You can set your data path (relative to your server file) using `/setdatapath`
-- After you set the data path, you can grab the current chunk you are on using `/grabchunkdata`
+- You can set your data path (relative to your server file) using: `/setdatapath`
+- After you set the data path, you can grab the current chunk you are on using `/grabchunkdata` which will extract a `.csv` file to your given directory
 - If you want to generate terrain for the chunk you are on, use `/modelgenerateterrain`
 
 ## Data Features
