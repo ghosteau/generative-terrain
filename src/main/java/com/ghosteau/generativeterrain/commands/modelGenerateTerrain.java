@@ -15,37 +15,67 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.nio.FloatBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Random;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Level;
 
+/**
+ * /generateterrain -- generates a chunk with the trained conditional-VAE decoder.
+ *
+ * <h2>Why this changed from the transformer version</h2>
+ * The old model conditioned each voxel on its neighbours' block IDs (plus light
+ * and a surface flag). Those describe terrain that does not exist yet at
+ * generation time, so the model only ever learned to copy existing neighbours
+ * and could not generate from nothing. The replacement is a generative decoder
+ * that takes only:
+ * <ul>
+ *   <li>a latent noise vector {@code z} (sampled fresh each run -> variety), and</li>
+ *   <li>the chunk's biome id.</li>
+ * </ul>
+ * It outputs class logits over 27 block <i>groups</i> for every voxel; we argmax
+ * to a group, then expand each group into a concrete block using local context
+ * ({@link #expandGroupToBlock}).
+ *
+ * <h2>Files required in the plugin data folder</h2>
+ * <ul>
+ *   <li>{@code terrain_vae_decoder.onnx} -- the exported decoder</li>
+ *   <li>{@code block_group_mapping.json} -- {@code {id: GROUP_NAME}}</li>
+ *   <li>{@code biome_id_mapping.json}    -- {@code {BIOME_NAME: id}}</li>
+ * </ul>
+ * All three come from the training notebook's export step.
+ */
 public class modelGenerateTerrain implements CommandExecutor
 {
     private final JavaPlugin plugin;
     private OrtEnvironment env;
     private OrtSession session;
     private final ConcurrentHashMap<UUID, AtomicBoolean> generationTasks = new ConcurrentHashMap<>();
-    private final String model = "terrain_transformer_model.onnx";
+
+    private final String model = "terrain_vae_decoder.onnx";
 
     private static final int CHUNK_WIDTH = 16;
     private static final int CHUNK_DEPTH = 16;
-    private static final int MODEL_CHUNK_HEIGHT = 32; // 32 for transformer, 256 for CNN model (as of now)
     private static final int MAX_Y = 319;
     private static final int MIN_Y = -64;
-    private static final int WORLD_CHUNK_HEIGHT = MAX_Y - MIN_Y + 1;
+    private static final int WORLD_CHUNK_HEIGHT = MAX_Y - MIN_Y + 1; // 384
+
+    // Latent vector length; read from the ONNX graph so Java stays in sync with the model.
+    private int latentDim = 64;
 
     private static final int BLOCKS_PER_BATCH = 2048;
     private static final int TICKS_BETWEEN_BATCHES = 1;
 
-    private final Map<String, Integer> biomeEncoder = new HashMap<>();
-    private final Map<String, Integer> blockTypeEncoder = new HashMap<>();
-    private final Map<Integer, Material> blockTypeDecoder = new HashMap<>();
+    // Mappings loaded from JSON.
+    private final Map<String, Integer> biomeEncoder = new HashMap<>();   // biome name -> id
+    private final Map<Integer, String> groupDecoder = new HashMap<>();   // class id -> group name
+
+    private final Random random = new Random();
 
     public modelGenerateTerrain(JavaPlugin plugin)
     {
@@ -54,19 +84,15 @@ public class modelGenerateTerrain implements CommandExecutor
         {
             env = OrtEnvironment.getEnvironment();
 
-            // Note: might be worth it to make a switch model command
-            // There are two models -- transformer based and pure CNN based
-            // Modify final variable "model" to use other model, default is transformer architecture
             File modelFile = new File(plugin.getDataFolder(), model);
             if (!modelFile.exists())
             {
-                plugin.getLogger().severe("Model file not found! Please place name_model.onnx in the plugin's data folder.");
+                plugin.getLogger().severe("Model file not found! Please place " + model + " in the plugin's data folder.");
                 return;
             }
 
-            File mappingFile = new File(plugin.getDataFolder(), "block_id_mapping.json");
-            blockTypeDecoder.putAll(loadBlockMapping(mappingFile));
-            blockTypeEncoder.putAll(loadReverseBlockMapping(mappingFile));
+            File groupFile = new File(plugin.getDataFolder(), "block_group_mapping.json");
+            groupDecoder.putAll(loadGroupMapping(groupFile));
 
             File biomeFile = new File(plugin.getDataFolder(), "biome_id_mapping.json");
             biomeEncoder.putAll(loadBiomeMapping(biomeFile));
@@ -76,7 +102,21 @@ public class modelGenerateTerrain implements CommandExecutor
             sessionOptions.setInterOpNumThreads(2);
             sessionOptions.setMemoryPatternOptimization(true);
             session = env.createSession(modelFile.getAbsolutePath(), sessionOptions);
-            plugin.getLogger().info("ONNX model loaded successfully!");
+
+            // The decoder's "z" input has shape [batch, latent_dim]; read latent_dim
+            // from the graph so we always sample a noise vector of the right size.
+            NodeInfo zInfo = session.getInputInfo().get("z");
+            if (zInfo != null && zInfo.getInfo() instanceof TensorInfo)
+            {
+                long[] shape = ((TensorInfo) zInfo.getInfo()).getShape();
+                if (shape.length == 2 && shape[1] > 0)
+                {
+                    latentDim = (int) shape[1];
+                }
+            }
+
+            plugin.getLogger().info("ONNX decoder loaded. latentDim=" + latentDim
+                    + ", groups=" + groupDecoder.size() + ", biomes=" + biomeEncoder.size());
         }
         catch (Exception e)
         {
@@ -84,57 +124,28 @@ public class modelGenerateTerrain implements CommandExecutor
         }
     }
 
-    private Map<Integer, Material> loadBlockMapping(File jsonFile)
+    /** Loads {@code {id: GROUP_NAME}} (the argmax class -> block group). */
+    private Map<Integer, String> loadGroupMapping(File jsonFile)
     {
-        Map<Integer, Material> mapping = new HashMap<>();
+        Map<Integer, String> mapping = new HashMap<>();
         try (InputStream is = new FileInputStream(jsonFile))
         {
             String json = new String(is.readAllBytes(), StandardCharsets.UTF_8);
             JsonObject obj = JsonParser.parseString(json).getAsJsonObject();
             for (String key : obj.keySet())
             {
-                int index = Integer.parseInt(key);
-                String blockName = obj.get(key).getAsString();
-                Material mat = Material.matchMaterial(blockName);
-                if (mat != null && mat.isBlock())
-                {
-                    mapping.put(index, mat);
-                }
-                else
-                {
-                    plugin.getLogger().warning("Invalid material in model mapping: " + blockName);
-                }
+                mapping.put(Integer.parseInt(key), obj.get(key).getAsString());
             }
         }
-        catch (IOException e)
+        catch (IOException | NumberFormatException e)
         {
-            plugin.getLogger().log(Level.SEVERE, "Failed to load block mapping", e);
+            plugin.getLogger().log(Level.SEVERE, "Failed to load block group mapping", e);
         }
-
-        plugin.getLogger().info("Loaded " + mapping.size() + " block mappings from JSON.");
+        plugin.getLogger().info("Loaded " + mapping.size() + " block group mappings from JSON.");
         return mapping;
     }
 
-    private Map<String, Integer> loadReverseBlockMapping(File jsonFile)
-    {
-        Map<String, Integer> reverseMapping = new HashMap<>();
-        try (InputStream is = new FileInputStream(jsonFile))
-        {
-            String json = new String(is.readAllBytes(), StandardCharsets.UTF_8);
-            JsonObject obj = JsonParser.parseString(json).getAsJsonObject();
-            for (String key : obj.keySet())
-            {
-                String blockName = obj.get(key).getAsString();
-                reverseMapping.put(blockName, Integer.parseInt(key));
-            }
-        }
-        catch (IOException e)
-        {
-            plugin.getLogger().log(Level.SEVERE, "Failed to load reverse block mapping", e);
-        }
-        return reverseMapping;
-    }
-
+    /** Loads {@code {BIOME_NAME: id}}. */
     private Map<String, Integer> loadBiomeMapping(File jsonFile)
     {
         Map<String, Integer> mapping = new HashMap<>();
@@ -234,36 +245,24 @@ public class modelGenerateTerrain implements CommandExecutor
     private void startTerrainGeneration(Chunk chunk, Player player)
     {
         final UUID playerUUID = player.getUniqueId();
-        final World world = chunk.getWorld();
-        final int chunkX = chunk.getX() * 16;
-        final int chunkZ = chunk.getZ() * 16;
 
-        // Run data gathering and model inference in async task
+        // Run model inference in an async task; block placement happens back on the main thread.
         Bukkit.getScheduler().runTaskAsynchronously(plugin, () ->
         {
             try
             {
                 if (!generationTasks.get(playerUUID).get()) return;
 
-                player.sendMessage(ChatColor.AQUA + "Gathering data and preparing model input...");
                 final String chunkBiomeName = getChunkBiome(chunk);
 
-                // Create input tensor and fill with data from the world
-                float[][][][][] inputTensorData = new float[1][10][CHUNK_WIDTH][MODEL_CHUNK_HEIGHT][CHUNK_DEPTH];
-                fillInputTensor(inputTensorData, world, chunkX, chunkZ, chunkBiomeName);
-
-                if (!generationTasks.get(playerUUID).get()) return;
-
-                // Run inference
                 player.sendMessage(ChatColor.AQUA + "Running AI model inference...");
-                float[][][][] outputBlocks = runModelInference(inputTensorData, player);
+                int[][][] groupGrid = runModelInference(chunkBiomeName, player);
 
-                if (!generationTasks.get(playerUUID).get() || outputBlocks == null) return;
+                if (!generationTasks.get(playerUUID).get() || groupGrid == null) return;
 
                 // Start applying blocks in the main thread
                 Bukkit.getScheduler().runTask(plugin, () ->
-                        applyTerrainChanges(chunk, outputBlocks, player, playerUUID));
-
+                        applyTerrainChanges(chunk, groupGrid, player, playerUUID));
             }
             catch (Exception e)
             {
@@ -274,77 +273,62 @@ public class modelGenerateTerrain implements CommandExecutor
         });
     }
 
-    private float[][][][] runModelInference(float[][][][][] inputTensorData, Player player)
+    /**
+     * Run the decoder once for this chunk.
+     *
+     * @return a [X][Y][Z] grid of block-group ids, or {@code null} on failure.
+     */
+    private int[][][] runModelInference(String chunkBiomeName, Player player)
     {
+        // Inputs: a fresh latent noise vector and the chunk's biome id.
+        float[][] zData = new float[1][latentDim];
+        for (int i = 0; i < latentDim; i++)
+        {
+            zData[0][i] = (float) random.nextGaussian();
+        }
+        long[] biomeData = new long[]{ biomeEncoder.getOrDefault(chunkBiomeName, 0) };
+
+        OnnxTensor zTensor = null;
+        OnnxTensor biomeTensor = null;
+        OrtSession.Result result = null;
         try
         {
-            // Convert tensor data to flat buffer for ONNX
-            int totalSize = 1 * 10 * CHUNK_WIDTH * MODEL_CHUNK_HEIGHT * CHUNK_DEPTH;
-            FloatBuffer inputBuffer = FloatBuffer.allocate(totalSize);
+            zTensor = OnnxTensor.createTensor(env, zData);          // FLOAT  [1, latentDim]
+            biomeTensor = OnnxTensor.createTensor(env, biomeData);  // INT64  [1]
 
-            // Flatten the tensor
-            for (int c = 0; c < 10; c++)
-                for (int x = 0; x < CHUNK_WIDTH; x++)
-                    for (int y = 0; y < MODEL_CHUNK_HEIGHT; y++)
-                        for (int z = 0; z < CHUNK_DEPTH; z++)
-                            inputBuffer.put(inputTensorData[0][c][x][y][z]);
-            inputBuffer.flip();
-
-            // Create ONNX tensor
-            OnnxTensor inputTensor = OnnxTensor.createTensor(env, inputBuffer,
-                    new long[]{1, 10, CHUNK_WIDTH, MODEL_CHUNK_HEIGHT, CHUNK_DEPTH});
-
-            // Run inference
             Map<String, OnnxTensor> inputs = new HashMap<>();
-            inputs.put("input", inputTensor);
+            inputs.put("z", zTensor);
+            inputs.put("biome_id", biomeTensor);
 
-            OrtSession.Result result = null;
-            try
+            result = session.run(inputs);
+
+            // Output: [1, numClasses, X, Y, Z]
+            float[][][][][] outputRaw = (float[][][][][]) ((OnnxTensor) result.get(0)).getValue();
+            int numClasses = outputRaw[0].length;
+
+            int[][][] groupGrid = new int[CHUNK_WIDTH][WORLD_CHUNK_HEIGHT][CHUNK_DEPTH];
+            for (int x = 0; x < CHUNK_WIDTH; x++)
             {
-                result = session.run(inputs);
-                OnnxTensor outputTensor = (OnnxTensor) result.get(0);
-
-                // Process model output
-                float[][][][][] outputRaw = (float[][][][][]) outputTensor.getValue();
-                float[][][][] outputBlocks = new float[CHUNK_WIDTH][WORLD_CHUNK_HEIGHT][CHUNK_DEPTH][1];
-                int numClasses = outputRaw[0].length;
-
-                // Convert model height space to world height space
-                for (int x = 0; x < CHUNK_WIDTH; x++)
+                for (int y = 0; y < WORLD_CHUNK_HEIGHT; y++)
                 {
-                    for (int modelY = 0; modelY < MODEL_CHUNK_HEIGHT; modelY++)
+                    for (int z = 0; z < CHUNK_DEPTH; z++)
                     {
-                        int worldY = modelY - (MODEL_CHUNK_HEIGHT - WORLD_CHUNK_HEIGHT) / 2;
-                        if (worldY < 0 || worldY >= WORLD_CHUNK_HEIGHT) continue;
-
-                        for (int z = 0; z < CHUNK_DEPTH; z++)
+                        float maxProb = Float.NEGATIVE_INFINITY;
+                        int bestClass = 0;
+                        for (int c = 0; c < numClasses; c++)
                         {
-                            float maxProb = Float.NEGATIVE_INFINITY;
-                            int bestClass = 0;
-
-                            // Find highest probability class
-                            for (int c = 0; c < numClasses; c++)
+                            float prob = outputRaw[0][c][x][y][z];
+                            if (prob > maxProb)
                             {
-                                float prob = outputRaw[0][c][x][modelY][z];
-                                if (prob > maxProb)
-                                {
-                                    maxProb = prob;
-                                    bestClass = c;
-                                }
+                                maxProb = prob;
+                                bestClass = c;
                             }
-                            outputBlocks[x][worldY][z][0] = bestClass;
                         }
+                        groupGrid[x][y][z] = bestClass;
                     }
                 }
-
-                return outputBlocks;
             }
-            finally
-            {
-                // Clean up resources
-                if (inputTensor != null) inputTensor.close();
-                if (result != null) result.close();
-            }
+            return groupGrid;
         }
         catch (OrtException e)
         {
@@ -352,9 +336,15 @@ public class modelGenerateTerrain implements CommandExecutor
             plugin.getLogger().log(Level.SEVERE, "Model inference error", e);
             return null;
         }
+        finally
+        {
+            if (zTensor != null) zTensor.close();
+            if (biomeTensor != null) biomeTensor.close();
+            if (result != null) result.close();
+        }
     }
 
-    private void applyTerrainChanges(Chunk chunk, float[][][][] outputBlocks, Player player, UUID playerUUID)
+    private void applyTerrainChanges(Chunk chunk, int[][][] groupGrid, Player player, UUID playerUUID)
     {
         final AtomicBoolean isGenerating = generationTasks.get(playerUUID);
         final int baseY = MIN_Y;
@@ -381,7 +371,6 @@ public class modelGenerateTerrain implements CommandExecutor
                     return;
                 }
 
-                // Get the current block index
                 int currentIndex = blockIndex.get();
                 int processed = 0;
 
@@ -394,18 +383,17 @@ public class modelGenerateTerrain implements CommandExecutor
 
                     try
                     {
-                        // Get block type from model output
-                        int blockId = (int) outputBlocks[x][y][z][0];
-                        Material mat = blockTypeDecoder.getOrDefault(blockId, Material.AIR);
+                        // Decode group id -> group name -> concrete block (height/context aware)
+                        int groupId = groupGrid[x][y][z];
+                        String groupName = groupDecoder.getOrDefault(groupId, "AIR");
+                        Material mat = expandGroupToBlock(groupName, chunk, x, y + baseY, z);
 
-                        // Get existing block
                         Block block = chunk.getBlock(x, y + baseY, z);
                         Material currentType = block.getType();
 
                         // Update block if different (skip air-to-air replacements)
                         if (mat != null && mat != currentType && !(mat == Material.AIR && currentType == Material.AIR))
                         {
-                            // Safe block update with client notification
                             block.setType(mat, false);  // false = don't update physics for better performance
                             blocksChanged.incrementAndGet();
                         }
@@ -436,70 +424,68 @@ public class modelGenerateTerrain implements CommandExecutor
                     generationTasks.remove(playerUUID);
                     cancel();
 
-                    // Notify client about block updates
                     chunk.getWorld().refreshChunk(chunk.getX(), chunk.getZ());
                 }
             }
         }.runTaskTimer(plugin, 5L, TICKS_BETWEEN_BATCHES);
     }
 
-    private void fillInputTensor(float[][][][][] input, World world, int chunkX, int chunkZ, String chunkBiomeName)
+    /**
+     * Expand a predicted block group into a concrete {@link Material}, using local
+     * context the model does not predict (deepslate vs stone ores by height,
+     * logs vs leaves by neighbours).
+     */
+    private Material expandGroupToBlock(String groupName, Chunk chunk, int x, int y, int z)
     {
-        for (int x = 0; x < CHUNK_WIDTH; x++)
+        World world = chunk.getWorld();
+        Block above = (y < MAX_Y) ? world.getBlockAt(x, y + 1, z) : null;
+        Block below = (y > MIN_Y) ? world.getBlockAt(x, y - 1, z) : null;
+
+        switch (groupName)
         {
-            for (int modelY = 0; modelY < MODEL_CHUNK_HEIGHT; modelY++)
-            {
-                int offset = ((MODEL_CHUNK_HEIGHT - WORLD_CHUNK_HEIGHT) / 2);
-                int worldY = modelY - offset + MIN_Y;
+            case "AIR":
+            case "CAVE_AIR":
+                return Material.AIR;
 
-                for (int z = 0; z < CHUNK_DEPTH; z++)
-                {
-                    // Skip positions outside world bounds
-                    if (worldY < MIN_Y || worldY > MAX_Y)
-                    {
-                        for (int c = 0; c < 10; c++)
-                        {
-                            input[0][c][x][modelY][z] = 0.0f;
-                        }
+            case "STONE":      return Material.STONE;
+            case "DEEPSLATE":  return Material.DEEPSLATE;
+            case "DIRT":       return Material.DIRT;
+            case "GRASS":      return Material.GRASS_BLOCK;
+            case "SAND":       return Material.SAND;
+            case "GRAVEL":     return Material.GRAVEL;
+            case "CLAY":       return Material.CLAY;
+            case "WATER":      return Material.WATER;
+            case "LAVA":       return Material.LAVA;
+            case "BEDROCK":    return Material.BEDROCK;
 
-                        continue;
-                    }
+            case "COAL_ORE":     return (y < 0) ? Material.DEEPSLATE_COAL_ORE : Material.COAL_ORE;
+            case "IRON_ORE":     return (y < 0) ? Material.DEEPSLATE_IRON_ORE : Material.IRON_ORE;
+            case "COPPER_ORE":   return (y < 0) ? Material.DEEPSLATE_COPPER_ORE : Material.COPPER_ORE;
+            case "GOLD_ORE":     return (y < 0) ? Material.DEEPSLATE_GOLD_ORE : Material.GOLD_ORE;
+            case "REDSTONE_ORE": return (y < 0) ? Material.DEEPSLATE_REDSTONE_ORE : Material.REDSTONE_ORE;
+            case "LAPIS_ORE":    return (y < 0) ? Material.DEEPSLATE_LAPIS_ORE : Material.LAPIS_ORE;
+            case "DIAMOND_ORE":  return (y < 0) ? Material.DEEPSLATE_DIAMOND_ORE : Material.DIAMOND_ORE;
+            case "EMERALD_ORE":  return (y < 0) ? Material.DEEPSLATE_EMERALD_ORE : Material.EMERALD_ORE;
 
-                    // Get block and surrounding blocks
-                    Block block = world.getBlockAt(chunkX + x, worldY, chunkZ + z);
-                    Block leftBlock = (x > 0) ?
-                            world.getBlockAt(chunkX + x - 1, worldY, chunkZ + z) :
-                            world.getBlockAt(chunkX + x, worldY, chunkZ + z);
-                    Block rightBlock = (x < CHUNK_WIDTH - 1) ?
-                            world.getBlockAt(chunkX + x + 1, worldY, chunkZ + z) :
-                            world.getBlockAt(chunkX + x, worldY, chunkZ + z);
-                    Block belowBlock = (worldY > MIN_Y) ?
-                            world.getBlockAt(chunkX + x, worldY - 1, chunkZ + z) : null;
-                    Block aboveBlock = (worldY < MAX_Y) ?
-                            world.getBlockAt(chunkX + x, worldY + 1, chunkZ + z) : null;
-                    Block frontBlock = (z < CHUNK_DEPTH - 1) ?
-                            world.getBlockAt(chunkX + x, worldY, chunkZ + z + 1) :
-                            world.getBlockAt(chunkX + x, worldY, chunkZ + z);
-                    Block behindBlock = (z > 0) ?
-                            world.getBlockAt(chunkX + x, worldY, chunkZ + z - 1) :
-                            world.getBlockAt(chunkX + x, worldY, chunkZ + z);
+            case "OAK_WOOD":
+                return hasWoodNearby(chunk, x, y, z) && hasAirAbove(above) ? Material.OAK_LEAVES : Material.OAK_LOG;
+            case "SPRUCE_WOOD":
+                return hasWoodNearby(chunk, x, y, z) && hasAirAbove(above) ? Material.SPRUCE_LEAVES : Material.SPRUCE_LOG;
+            case "BIRCH_WOOD":
+                return hasWoodNearby(chunk, x, y, z) && hasAirAbove(above) ? Material.BIRCH_LEAVES : Material.BIRCH_LOG;
+            case "JUNGLE_WOOD":
+                return hasWoodNearby(chunk, x, y, z) && hasAirAbove(above) ? Material.JUNGLE_LEAVES : Material.JUNGLE_LOG;
+            case "ACACIA_WOOD":
+                return hasWoodNearby(chunk, x, y, z) && hasAirAbove(above) ? Material.ACACIA_LEAVES : Material.ACACIA_LOG;
+            case "DARK_OAK_WOOD":
+                return hasWoodNearby(chunk, x, y, z) && hasAirAbove(above) ? Material.DARK_OAK_LEAVES : Material.DARK_OAK_LOG;
 
-                    // Get biome name
-                    String biomeName = block.getBiome().toString();
+            case "VEGETATION":
+                return isSolid(below) ? Material.SHORT_GRASS : Material.AIR;
 
-                    // Fill input tensor features
-                    input[0][0][x][modelY][z] = getBiomeFeature(chunkBiomeName);
-                    input[0][1][x][modelY][z] = getBiomeFeature(biomeName);
-                    input[0][2][x][modelY][z] = (aboveBlock != null && aboveBlock.getType() == Material.AIR) ? 1.0f : 0.0f;
-                    input[0][3][x][modelY][z] = block.getLightLevel() / 15.0f;
-                    input[0][4][x][modelY][z] = leftBlock != null ? getBlockTypeFeature(leftBlock.getType().toString()) : 0.0f;
-                    input[0][5][x][modelY][z] = rightBlock != null ? getBlockTypeFeature(rightBlock.getType().toString()) : 0.0f;
-                    input[0][6][x][modelY][z] = belowBlock != null ? getBlockTypeFeature(belowBlock.getType().toString()) : 0.0f;
-                    input[0][7][x][modelY][z] = aboveBlock != null ? getBlockTypeFeature(aboveBlock.getType().toString()) : 0.0f;
-                    input[0][8][x][modelY][z] = frontBlock != null ? getBlockTypeFeature(frontBlock.getType().toString()) : 0.0f;
-                    input[0][9][x][modelY][z] = behindBlock != null ? getBlockTypeFeature(behindBlock.getType().toString()) : 0.0f;
-                }
-            }
+            case "MISC":
+            default:
+                return Material.STONE;
         }
     }
 
@@ -512,14 +498,35 @@ public class modelGenerateTerrain implements CommandExecutor
         return biome.toString();
     }
 
-    private float getBiomeFeature(String biomeName)
+    private boolean hasWoodNearby(Chunk chunk, int x, int y, int z)
     {
-        return biomeEncoder.getOrDefault(biomeName, 0);
+        int range = 2;
+        for (int dx = -range; dx <= range; dx++)
+        {
+            for (int dy = -range; dy <= range; dy++)
+            {
+                for (int dz = -range; dz <= range; dz++)
+                {
+                    try
+                    {
+                        String name = chunk.getWorld().getBlockAt(x + dx, y + dy, z + dz).getType().toString();
+                        if (name.contains("LOG")) return true;
+                    }
+                    catch (Exception ignored) { }
+                }
+            }
+        }
+        return false;
     }
 
-    private float getBlockTypeFeature(String blockType)
+    private boolean hasAirAbove(Block block)
     {
-        return blockTypeEncoder.getOrDefault(blockType, 0);
+        return block != null && block.getType() == Material.AIR;
+    }
+
+    private boolean isSolid(Block block)
+    {
+        return block != null && block.getType().isSolid();
     }
 
     public void cleanup()

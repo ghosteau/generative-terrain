@@ -1,0 +1,17 @@
+# GenerativeTerrain ML pipeline dependencies.
+#
+# IMPORTANT — GPU training:
+#   This file pins the CPU build of torch so it installs anywhere (CI, laptops).
+#   To train on your RTX 4070, install the CUDA build INSTEAD, e.g.:
+#     pip install torch --index-url https://download.pytorch.org/whl/cu124
+#   then `pip install -r requirements.txt` for the rest.
+
+torch>=2.2          # neural network framework (install CUDA build for GPU training)
+numpy>=1.26
+pandas>=2.0         # CSV ingestion
+scikit-learn>=1.3   # (kept for parity with legacy notebooks; optional)
+matplotlib>=3.7     # evaluation plots
+tqdm>=4.65          # progress bars
+onnx>=1.15          # model export
+onnxruntime>=1.17   # export verification (mirrors the Java runtime)
+pytest>=7.4         # tests
