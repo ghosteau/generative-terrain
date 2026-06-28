@@ -33,6 +33,8 @@ All required plugin dependencies are located in the `plugins_server` folder and 
 - You can set your data path (relative to your server file) using: `/setdatapath`
 - After you set the data path, you can grab the current chunk you are on using `/grabchunkdata` which will extract a `.csv` file to your given directory
 - To grab many chunks at once, use `/grabchunkarea [radius]` which exports every chunk in a square radius around you (one `.csv` per chunk)
+- To collect a rare biome, use `/grabbiome <biome> [count] [searchRadius]` which searches outward and exports chunks of that biome (e.g. `/grabbiome taiga 20`)
+- To over-sample chunks containing a block, use `/grabblock <block> [count] [searchRadius] [minPerChunk]` (e.g. `/grabblock water 20`)
 - If you want to generate terrain for the chunk you are on, use `/modelgenerateterrain`
 
 ## Data Features

@@ -27,6 +27,16 @@ commands:
     usage: /<command> [radius]
     permission: generativeterrain.grabchunkdata
     permission-message: You don't have permission to use this command.
+  grabBiome:
+    description: Searches outward and exports chunks of a specific (rare) biome.
+    usage: /<command> <biome> [count] [searchRadius]
+    permission: generativeterrain.grabchunkdata
+    permission-message: You don't have permission to use this command.
+  grabBlock:
+    description: Searches outward and exports chunks containing a specific block.
+    usage: /<command> <block> [count] [searchRadius] [minPerChunk]
+    permission: generativeterrain.grabchunkdata
+    permission-message: You don't have permission to use this command.
   setDataPath:
     description: Sets the path in which you want to export chunk CSV data to via grabChunkData command.
     usage: /<command> <path>
