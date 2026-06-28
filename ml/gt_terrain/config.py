@@ -81,13 +81,18 @@ class Config:
     biome_embed_dim: int = 16
     base_channels: int = 32           # width of the 3D conv stacks
 
-    # VAE
-    latent_dim: int = 64
-    # KL is averaged per latent dim (see train._kl_with_free_bits), so it's on the
-    # same scale as the per-voxel reconstruction loss and beta ~1 is balanced.
+    # VAE -- the latent is a small SPATIAL grid, not a single vector. A vector
+    # latent broadcast uniformly can only produce the average column (flat
+    # terrain); a coarse 3D latent lets different regions of the chunk differ,
+    # which is what yields hills, valleys, and caves.
+    latent_channels: int = 8          # channels per latent grid cell
+    latent_grid: tuple = (4, 8, 4)    # (x, y, z) latent resolution; 4x4 horizontal cells
+    latent_dim: int = 64              # width of the (ignored) z for baseline ONNX export
+    # KL is averaged per latent element (see train._kl_with_free_bits), so it's on
+    # the same scale as the per-voxel reconstruction loss and beta ~1 is balanced.
     beta: float = 1.0                 # KL weight (target after annealing)
     kl_anneal_epochs: int = 10        # epochs to ramp beta 0 -> beta
-    free_bits: float = 0.02           # nats per latent dim that incur no KL penalty
+    free_bits: float = 0.02           # nats per latent element that incur no KL penalty
 
     # Optimisation
     batch_size: int = 8
@@ -110,6 +115,11 @@ class Config:
     def voxels_per_chunk(self) -> int:
         return self.chunk_width * self.chunk_height * self.chunk_depth
 
+    @property
+    def vae_latent_shape(self) -> tuple:
+        """Full latent tensor shape per sample: (channels, x, y, z)."""
+        return (self.latent_channels, *self.latent_grid)
+
     def ensure_dirs(self) -> None:
         Path(self.artifact_dir).mkdir(parents=True, exist_ok=True)
 
@@ -120,6 +130,8 @@ class Config:
             max_chunks=8,
             base_channels=8,
             biome_embed_dim=4,
+            latent_channels=4,
+            latent_grid=(2, 4, 2),
             latent_dim=8,
             batch_size=2,
             epochs=2,

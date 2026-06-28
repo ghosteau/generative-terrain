@@ -15,6 +15,7 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.FloatBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
@@ -65,8 +66,10 @@ public class modelGenerateTerrain implements CommandExecutor
     private static final int MIN_Y = -64;
     private static final int WORLD_CHUNK_HEIGHT = MAX_Y - MIN_Y + 1; // 384
 
-    // Latent vector length; read from the ONNX graph so Java stays in sync with the model.
-    private int latentDim = 64;
+    // Latent input shape (with batch = 1), read from the ONNX graph so Java stays in
+    // sync with the model. The baseline uses a vector latent [1, N]; the VAE uses a
+    // small spatial latent [1, C, x, y, z]. We sample one N(0,1) value per element.
+    private long[] zShape = {1, 64};
 
     private static final int BLOCKS_PER_BATCH = 2048;
     private static final int TICKS_BETWEEN_BATCHES = 1;
@@ -103,19 +106,21 @@ public class modelGenerateTerrain implements CommandExecutor
             sessionOptions.setMemoryPatternOptimization(true);
             session = env.createSession(modelFile.getAbsolutePath(), sessionOptions);
 
-            // The decoder's "z" input has shape [batch, latent_dim]; read latent_dim
-            // from the graph so we always sample a noise vector of the right size.
+            // Read the full "z" input shape from the graph and fix the batch dim to 1,
+            // so we sample exactly the latent the loaded model expects (vector or spatial).
             NodeInfo zInfo = session.getInputInfo().get("z");
             if (zInfo != null && zInfo.getInfo() instanceof TensorInfo)
             {
                 long[] shape = ((TensorInfo) zInfo.getInfo()).getShape();
-                if (shape.length == 2 && shape[1] > 0)
+                if (shape.length >= 1)
                 {
-                    latentDim = (int) shape[1];
+                    zShape = shape.clone();
+                    for (int i = 0; i < zShape.length; i++)
+                        if (zShape[i] <= 0) zShape[i] = 1;   // dynamic dims (e.g. batch) -> 1
                 }
             }
 
-            plugin.getLogger().info("ONNX decoder loaded. latentDim=" + latentDim
+            plugin.getLogger().info("ONNX decoder loaded. zShape=" + java.util.Arrays.toString(zShape)
                     + ", groups=" + groupDecoder.size() + ", biomes=" + biomeEncoder.size());
         }
         catch (Exception e)
@@ -280,12 +285,12 @@ public class modelGenerateTerrain implements CommandExecutor
      */
     private int[][][] runModelInference(String chunkBiomeName, Player player)
     {
-        // Inputs: a fresh latent noise vector and the chunk's biome id.
-        float[][] zData = new float[1][latentDim];
-        for (int i = 0; i < latentDim; i++)
-        {
-            zData[0][i] = (float) random.nextGaussian();
-        }
+        // Inputs: a fresh latent (one N(0,1) value per element) and the chunk's biome id.
+        long zCount = 1;
+        for (long d : zShape) zCount *= d;
+        FloatBuffer zBuffer = FloatBuffer.allocate((int) zCount);
+        for (int i = 0; i < zCount; i++) zBuffer.put((float) random.nextGaussian());
+        zBuffer.flip();
         long[] biomeData = new long[]{ biomeEncoder.getOrDefault(chunkBiomeName, 0) };
 
         OnnxTensor zTensor = null;
@@ -293,8 +298,8 @@ public class modelGenerateTerrain implements CommandExecutor
         OrtSession.Result result = null;
         try
         {
-            zTensor = OnnxTensor.createTensor(env, zData);          // FLOAT  [1, latentDim]
-            biomeTensor = OnnxTensor.createTensor(env, biomeData);  // INT64  [1]
+            zTensor = OnnxTensor.createTensor(env, zBuffer, zShape);  // FLOAT, model's z shape
+            biomeTensor = OnnxTensor.createTensor(env, biomeData);   // INT64 [1]
 
             Map<String, OnnxTensor> inputs = new HashMap<>();
             inputs.put("z", zTensor);

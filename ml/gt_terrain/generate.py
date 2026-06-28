@@ -37,7 +37,7 @@ def sample_grids(
     device = torch.device(config.device)
     shape = (config.chunk_width, config.chunk_height, config.chunk_depth)
 
-    z = torch.randn(n, config.latent_dim, device=device) * temperature
+    z = torch.randn(n, *config.vae_latent_shape, device=device) * temperature
     biome = torch.full((n,), int(biome_id), dtype=torch.long, device=device)
     logits = vae.decode(z, biome, shape)              # [n, C, X, Y, Z]
     preds = logits.argmax(dim=1).cpu().numpy().astype(np.int16)

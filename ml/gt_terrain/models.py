@@ -29,6 +29,11 @@ import torch.nn.functional as F
 from gt_terrain.config import Config
 
 
+def _num_groups(channels: int) -> int:
+    """Largest GroupNorm group count (<=8) that divides ``channels``."""
+    return next(g for g in (8, 4, 2, 1) if channels % g == 0)
+
+
 def coordinate_features(
     batch: int, x: int, y: int, z: int, device: torch.device | str
 ) -> torch.Tensor:
@@ -51,7 +56,7 @@ class _ResBlock3D(nn.Module):
 
     def __init__(self, channels: int):
         super().__init__()
-        groups = min(8, channels)
+        groups = _num_groups(channels)
         self.norm1 = nn.GroupNorm(groups, channels)
         self.conv1 = nn.Conv3d(channels, channels, 3, padding=1)
         self.norm2 = nn.GroupNorm(groups, channels)
@@ -77,7 +82,7 @@ class _DecoderBody(nn.Module):
         self.stem = nn.Conv3d(in_channels, hidden, 3, padding=1)
         self.blocks = nn.ModuleList(_ResBlock3D(hidden) for _ in range(num_blocks))
         self.head = nn.Sequential(
-            nn.GroupNorm(min(8, hidden), hidden),
+            nn.GroupNorm(_num_groups(hidden), hidden),
             nn.GELU(),
             nn.Conv3d(hidden, num_classes, 1),
         )
@@ -87,6 +92,53 @@ class _DecoderBody(nn.Module):
         for blk in self.blocks:
             h = blk(h)
         return self.head(h)
+
+
+class _ConvBlock(nn.Module):
+    """Two 3x3x3 convs with GroupNorm + GELU."""
+
+    def __init__(self, in_ch: int, out_ch: int):
+        super().__init__()
+        g = _num_groups(out_ch)
+        self.net = nn.Sequential(
+            nn.Conv3d(in_ch, out_ch, 3, padding=1), nn.GroupNorm(g, out_ch), nn.GELU(),
+            nn.Conv3d(out_ch, out_ch, 3, padding=1), nn.GroupNorm(g, out_ch), nn.GELU(),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
+class _UNetDecoder(nn.Module):
+    """3D U-Net mapping a conditioning volume to class logits.
+
+    The two down/up levels give the model a chunk-scale receptive field, so it
+    can form coherent large structures (hills, cave systems) rather than
+    predicting each voxel from a tiny local window. Down/up sampling uses
+    pooling + trilinear interpolation (with recorded sizes) so it works for any
+    chunk geometry and exports cleanly to ONNX.
+    """
+
+    def __init__(self, in_channels: int, base: int, num_classes: int):
+        super().__init__()
+        self.in_conv = _ConvBlock(in_channels, base)
+        self.enc1 = _ConvBlock(base, base)
+        self.enc2 = _ConvBlock(base, base * 2)
+        self.bottleneck = _ConvBlock(base * 2, base * 2)
+        self.dec2 = _ConvBlock(base * 2 + base * 2, base * 2)
+        self.dec1 = _ConvBlock(base * 2 + base, base)
+        self.head = nn.Conv3d(base, num_classes, 1)
+
+    def forward(self, cond: torch.Tensor) -> torch.Tensor:
+        x0 = self.in_conv(cond)
+        e1 = self.enc1(x0)                                   # full res (skip)
+        e2 = self.enc2(F.max_pool3d(e1, 2))                 # /2 (skip)
+        b = self.bottleneck(F.max_pool3d(e2, 2))            # /4
+        d2 = F.interpolate(b, size=e2.shape[2:], mode="trilinear", align_corners=False)
+        d2 = self.dec2(torch.cat([d2, e2], dim=1))          # /2
+        d1 = F.interpolate(d2, size=e1.shape[2:], mode="trilinear", align_corners=False)
+        d1 = self.dec1(torch.cat([d1, e1], dim=1))          # full res
+        return self.head(d1)
 
 
 class BaselineVoxelNet(nn.Module):
@@ -111,11 +163,17 @@ class BaselineVoxelNet(nn.Module):
 
 
 class _Encoder(nn.Module):
-    """Real chunk (+ biome) -> latent (mu, logvar) via strided downsampling."""
+    """Real chunk (+ biome) -> SPATIAL latent (mu, logvar) of shape [B, Cz, lx, ly, lz].
+
+    Instead of pooling the whole chunk to a single vector, we pool to a small 3D
+    grid. Each latent cell summarises a region of the chunk, so the decoder can
+    reconstruct (and later sample) terrain that differs from place to place.
+    """
 
     def __init__(self, num_classes: int, num_biomes: int, config: Config):
         super().__init__()
         c = config.base_channels
+        self.latent_grid = config.latent_grid
         self.block_embed = nn.Embedding(num_classes, c)
         self.biome_embed = nn.Embedding(num_biomes, config.biome_embed_dim)
         self.down = nn.Sequential(
@@ -123,8 +181,9 @@ class _Encoder(nn.Module):
             nn.Conv3d(c, c * 2, 4, stride=2, padding=1), nn.GELU(),
             nn.Conv3d(c * 2, c * 4, 4, stride=2, padding=1), nn.GELU(),
         )
-        self.pool = nn.AdaptiveAvgPool3d(1)          # geometry-agnostic
-        self.to_latent = nn.Linear(c * 4, config.latent_dim * 2)
+        # Pool to the coarse latent grid, then 1x1 conv to 2*Cz (mu + logvar).
+        self.pool = nn.AdaptiveAvgPool3d(config.latent_grid)
+        self.to_latent = nn.Conv3d(c * 4, config.latent_channels * 2, 1)
 
     def forward(self, grid: torch.Tensor, biome_id: torch.Tensor):
         # grid: [B,X,Y,Z] longs with -1 for "ignore"; clamp so embedding is valid.
@@ -134,13 +193,18 @@ class _Encoder(nn.Module):
         be = self.biome_embed(biome_id)[:, :, None, None, None].expand(-1, -1, x, y, z)
         h = torch.cat([emb, be], dim=1)
         h = self.down(h)
-        h = self.pool(h).flatten(1)
-        mu, logvar = self.to_latent(h).chunk(2, dim=1)
+        h = self.pool(h)                                        # [B, c*4, lx, ly, lz]
+        mu, logvar = self.to_latent(h).chunk(2, dim=1)          # each [B, Cz, lx, ly, lz]
         return mu, logvar
 
 
 class ConditionalTerrainVAE(nn.Module):
-    """Conditional VAE over voxel grids; generation = sampling ``z``."""
+    """Conditional VAE with a spatial latent; generation = sampling ``z``.
+
+    The latent ``z`` is a coarse 3D grid (``config.vae_latent_shape``) that the
+    decoder upsamples to full resolution. Combined with the U-Net decoder, this
+    is what lets generated terrain have hills and caves rather than flat layers.
+    """
 
     def __init__(self, num_classes: int, num_biomes: int, config: Config):
         super().__init__()
@@ -148,8 +212,8 @@ class ConditionalTerrainVAE(nn.Module):
         self.num_classes = num_classes
         self.encoder = _Encoder(num_classes, num_biomes, config)
         self.biome_embed = nn.Embedding(num_biomes, config.biome_embed_dim)
-        in_ch = 3 + config.latent_dim + config.biome_embed_dim
-        self.decoder = _DecoderBody(in_ch, config.base_channels, num_classes)
+        in_ch = 3 + config.latent_channels + config.biome_embed_dim
+        self.decoder = _UNetDecoder(in_ch, config.base_channels, num_classes)
 
     @staticmethod
     def reparameterize(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
@@ -159,10 +223,11 @@ class ConditionalTerrainVAE(nn.Module):
     def decode(
         self, z: torch.Tensor, biome_id: torch.Tensor, shape: tuple[int, int, int]
     ) -> torch.Tensor:
+        # z: [B, Cz, lx, ly, lz] -> upsample to full resolution and condition on it.
         x, y, z_dim = shape
         b = z.shape[0]
         pos = coordinate_features(b, x, y, z_dim, z.device)
-        zt = z[:, :, None, None, None].expand(-1, -1, x, y, z_dim)
+        zt = F.interpolate(z, size=(x, y, z_dim), mode="trilinear", align_corners=False)
         be = self.biome_embed(biome_id)[:, :, None, None, None].expand(-1, -1, x, y, z_dim)
         cond = torch.cat([pos, zt, be], dim=1)
         return self.decoder(cond)

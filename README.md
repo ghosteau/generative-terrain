@@ -32,6 +32,7 @@ All required plugin dependencies are located in the `plugins_server` folder and 
 ## Commands:
 - You can set your data path (relative to your server file) using: `/setdatapath`
 - After you set the data path, you can grab the current chunk you are on using `/grabchunkdata` which will extract a `.csv` file to your given directory
+- To grab many chunks at once, use `/grabchunkarea [radius]` which exports every chunk in a square radius around you (one `.csv` per chunk)
 - If you want to generate terrain for the chunk you are on, use `/modelgenerateterrain`
 
 ## Data Features

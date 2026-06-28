@@ -7,7 +7,7 @@ description: A plugin for chunk data harvesting and generating AI-based terrain 
 
 permissions:
   generativeterrain.grabchunkdata:
-    description: Allows the player to grab chunk data
+    description: Allows the player to grab chunk data (single chunk and bulk area)
     default: op
   generativeterrain.setdatapath:
     description: Allows the player to set the data path
@@ -20,6 +20,11 @@ commands:
   grabChunkData:
     description: Grabs all environment data in a player's current chunk and exports it to a CSV file format.
     usage: /<command>
+    permission: generativeterrain.grabchunkdata
+    permission-message: You don't have permission to use this command.
+  grabChunkArea:
+    description: Bulk-exports every chunk in a square radius (in chunks) around you, one CSV per chunk.
+    usage: /<command> [radius]
     permission: generativeterrain.grabchunkdata
     permission-message: You don't have permission to use this command.
   setDataPath:

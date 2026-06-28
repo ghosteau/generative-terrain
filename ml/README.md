@@ -26,7 +26,9 @@ gt_terrain/
   config.py     Paths + hyper-parameters (env-overridable). Config.tiny() for CPU dry-runs.
   blocks.py     27-group block taxonomy — the single source of truth (Python + Java share it).
   data.py       CSV -> voxel grids (leakage-free, vectorised), dataset + augmentation.
-  models.py     BaselineVoxelNet (deterministic) and ConditionalTerrainVAE (generative).
+  models.py     BaselineVoxelNet (deterministic floor) and ConditionalTerrainVAE
+                (generative; SPATIAL latent + U-Net decoder so terrain can have
+                hills and caves rather than flat layers).
   train.py      Training loops (class-weighted CE; VAE adds KL annealing + free bits).
   evaluate.py   Accuracy + terrain-plausibility (vertical profiles), diversity, plots.
   generate.py   Sample chunks from the VAE; write a block-name CSV.
@@ -84,8 +86,11 @@ Copy all three into `<server>/plugins/GenerativeTerrain/`, then run
 ## Current limitations / next steps
 
 * **Data:** ~230 chunks today. This is the biggest constraint; the VAE is
-  data-hungry. Export more biomes/worlds.
+  data-hungry. Collect more quickly in-game with **`/grabchunkarea <radius>`**,
+  which exports a whole square of chunks at once (one CSV each).
 * **Per-chunk independence:** chunks are generated in isolation, so edges between
   adjacent generated chunks won't line up yet.
-* **Scale with data:** raise `latent_dim`, `base_channels`, and `epochs` as the
-  dataset grows.
+* **Scale with data:** raise `base_channels`, `latent_channels`, the
+  `latent_grid` resolution, and `epochs` as the dataset grows. The VAE needs
+  enough epochs to converge -- undertrained it produces speckle (stray blocks);
+  watch the vertical-profile plot to judge convergence.

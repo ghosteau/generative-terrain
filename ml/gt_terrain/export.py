@@ -37,7 +37,7 @@ def export_decoder_onnx(
     shape = (config.chunk_width, config.chunk_height, config.chunk_depth)
 
     wrapper = VAEDecoderForExport(vae, shape).to("cpu").eval()
-    dummy_z = torch.randn(1, config.latent_dim)
+    dummy_z = torch.randn(1, *config.vae_latent_shape)   # spatial latent [1, Cz, lx, ly, lz]
     dummy_biome = torch.zeros(1, dtype=torch.long)
 
     torch.onnx.export(
@@ -135,7 +135,11 @@ def verify_onnx(onnx_path: str | Path, config: Config, num_biomes: int) -> tuple
         return None
 
     sess = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
-    z = np.random.randn(1, config.latent_dim).astype(np.float32)
+    # Derive the z shape from the graph so this works for both the baseline
+    # (vector z) and the VAE (spatial z); replace the dynamic batch dim with 1.
+    z_shape = [d if isinstance(d, int) and d > 0 else 1
+               for d in next(i for i in sess.get_inputs() if i.name == "z").shape]
+    z = np.random.randn(*z_shape).astype(np.float32)
     biome = np.array([np.random.randint(0, num_biomes)], dtype=np.int64)
     out = sess.run(["logits"], {"z": z, "biome_id": biome})[0]
 

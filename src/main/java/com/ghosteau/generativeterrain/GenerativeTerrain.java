@@ -1,5 +1,6 @@
 package com.ghosteau.generativeterrain;
 
+import com.ghosteau.generativeterrain.commands.grabChunkArea;
 import com.ghosteau.generativeterrain.commands.grabChunkData;
 import com.ghosteau.generativeterrain.commands.modelGenerateTerrain;
 import com.ghosteau.generativeterrain.commands.setDataPath;
@@ -16,6 +17,7 @@ public class GenerativeTerrain extends JavaPlugin
     {
         // Register commands
         this.getCommand("grabChunkData").setExecutor(new grabChunkData());
+        this.getCommand("grabChunkArea").setExecutor(new grabChunkArea(this));
         this.getCommand("setDataPath").setExecutor(new setDataPath());
 
         // Initialize and register the terrain generator command
