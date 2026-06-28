@@ -20,7 +20,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 
 from gt_terrain.config import Config
 from gt_terrain.data import IGNORE_INDEX, ChunkGridDataset, split_indices
@@ -50,13 +50,29 @@ def set_seed(seed: int) -> None:
 def make_loaders(
     grids: np.ndarray, biome_ids: np.ndarray, config: Config
 ) -> tuple[DataLoader, DataLoader, DataLoader]:
-    """Train/val/test loaders from in-memory grids (augment train only)."""
+    """Train/val/test loaders from in-memory grids (augment train only).
+
+    When ``config.balance_biomes`` is set, the training loader draws chunks with a
+    biome-balanced sampler (probability ~ 1/biome_count) so the model sees rare
+    biomes (RIVER, SAVANNA, ...) about as often as common ones (FOREST, PLAINS)
+    instead of overfitting the majority.
+    """
     train_idx, val_idx, test_idx = split_indices(len(grids), config)
     common = dict(num_workers=config.num_workers, pin_memory=(config.device == "cuda"))
-    train = DataLoader(
-        ChunkGridDataset(grids, biome_ids, train_idx, augment=config.augment),
-        batch_size=config.batch_size, shuffle=True, drop_last=False, **common,
-    )
+
+    train_ds = ChunkGridDataset(grids, biome_ids, train_idx, augment=config.augment)
+    if config.balance_biomes and len(train_idx) > 0:
+        b = biome_ids[train_idx]
+        counts = np.bincount(b, minlength=int(b.max()) + 1)
+        weights = 1.0 / np.maximum(counts[b], 1)
+        sampler = WeightedRandomSampler(
+            torch.as_tensor(weights, dtype=torch.double), len(train_idx), replacement=True
+        )
+        train = DataLoader(train_ds, batch_size=config.batch_size, sampler=sampler,
+                           drop_last=False, **common)
+    else:
+        train = DataLoader(train_ds, batch_size=config.batch_size, shuffle=True,
+                           drop_last=False, **common)
     val = DataLoader(
         ChunkGridDataset(grids, biome_ids, val_idx, augment=False),
         batch_size=config.batch_size, shuffle=False, **common,

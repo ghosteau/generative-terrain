@@ -32,6 +32,7 @@ gt_terrain/
   train.py      Training loops (class-weighted CE; VAE adds KL annealing + free bits).
   evaluate.py   Accuracy + terrain-plausibility (vertical profiles), diversity, plots.
   generate.py   Sample chunks from the VAE; write a block-name CSV.
+  postprocess.py  Clean speckle / fill pinholes (keeps caves) + procedural ore scatter.
   export.py     ONNX decoder export + the JSON mappings the plugin reads.
 notebooks/
   GenerativeTerrain.ipynb   The driver notebook.

@@ -18,6 +18,7 @@ import torch
 from gt_terrain.blocks import BlockGrouping
 from gt_terrain.config import Config
 from gt_terrain.models import ConditionalTerrainVAE
+from gt_terrain.postprocess import postprocess_grid
 
 
 @torch.no_grad()
@@ -27,11 +28,18 @@ def sample_grids(
     n: int,
     config: Config,
     temperature: float = 1.0,
+    postprocess: bool = True,
+    grouping: BlockGrouping | None = None,
+    rng: np.random.Generator | None = None,
 ) -> np.ndarray:
     """Sample ``n`` chunks for one biome. Returns group-id grids ``[n,X,Y,Z]``.
 
     ``temperature`` scales the prior std: 1.0 matches training; <1 yields more
     typical (smoother) terrain, >1 more varied/risky terrain.
+
+    With ``postprocess`` (default), each sample is cleaned (despeckle / fill
+    pinholes) and has ores scattered in -- the same steps the plugin applies in
+    game. Pass ``postprocess=False`` to inspect the raw model output.
     """
     vae.eval()
     device = torch.device(config.device)
@@ -41,6 +49,11 @@ def sample_grids(
     biome = torch.full((n,), int(biome_id), dtype=torch.long, device=device)
     logits = vae.decode(z, biome, shape)              # [n, C, X, Y, Z]
     preds = logits.argmax(dim=1).cpu().numpy().astype(np.int16)
+
+    if postprocess:
+        grouping = grouping or BlockGrouping()
+        rng = rng or np.random.default_rng()
+        preds = np.stack([postprocess_grid(preds[i], grouping, config, rng) for i in range(n)])
     return preds
 
 

@@ -76,6 +76,7 @@ class Config:
     val_split: float = 0.15
     test_split: float = 0.15
     augment: bool = True              # rotate/flip augmentation in the dataset
+    balance_biomes: bool = True       # weighted sampling so rare biomes aren't drowned out
 
     # Shared model dims
     biome_embed_dim: int = 16
@@ -86,13 +87,21 @@ class Config:
     # terrain); a coarse 3D latent lets different regions of the chunk differ,
     # which is what yields hills, valleys, and caves.
     latent_channels: int = 8          # channels per latent grid cell
-    latent_grid: tuple = (4, 8, 4)    # (x, y, z) latent resolution; 4x4 horizontal cells
+    # (x, y, z) latent resolution. The Y axis is kept relatively fine so the model
+    # can localise where the surface sits per column (coarse Y -> fuzzy/carved
+    # surfaces); 4x4 horizontal cells give hill/valley variation.
+    latent_grid: tuple = (4, 16, 4)
     latent_dim: int = 64              # width of the (ignored) z for baseline ONNX export
     # KL is averaged per latent element (see train._kl_with_free_bits), so it's on
     # the same scale as the per-voxel reconstruction loss and beta ~1 is balanced.
     beta: float = 1.0                 # KL weight (target after annealing)
     kl_anneal_epochs: int = 10        # epochs to ramp beta 0 -> beta
     free_bits: float = 0.02           # nats per latent element that incur no KL penalty
+
+    # Post-processing of generated terrain (model predicts shape; we clean + scatter ores).
+    clean_terrain: bool = True        # remove floating specks / fill 1-voxel pinholes (keeps caves)
+    ore_scatter: bool = True          # procedurally scatter ores into stone/deepslate
+    ore_density: float = 1.0          # global multiplier on ore spawn probabilities
 
     # Optimisation
     batch_size: int = 8

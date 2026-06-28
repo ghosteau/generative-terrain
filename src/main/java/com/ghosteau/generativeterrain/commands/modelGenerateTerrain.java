@@ -74,6 +74,9 @@ public class modelGenerateTerrain implements CommandExecutor
     private static final int BLOCKS_PER_BATCH = 2048;
     private static final int TICKS_BETWEEN_BATCHES = 1;
 
+    // Post-processing: clean speckle + scatter ores into stone/deepslate (see TerrainPostProcessor).
+    private static final double ORE_DENSITY = 1.0;
+
     // Mappings loaded from JSON.
     private final Map<String, Integer> biomeEncoder = new HashMap<>();   // biome name -> id
     private final Map<Integer, String> groupDecoder = new HashMap<>();   // class id -> group name
@@ -333,6 +336,9 @@ public class modelGenerateTerrain implements CommandExecutor
                     }
                 }
             }
+
+            // Clean speckle and scatter ores (deterministic post-process, mirrors Python).
+            TerrainPostProcessor.process(groupGrid, groupDecoder, MIN_Y, ORE_DENSITY, random);
             return groupGrid;
         }
         catch (OrtException e)
