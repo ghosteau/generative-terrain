@@ -198,12 +198,39 @@ class _Encoder(nn.Module):
         return mu, logvar
 
 
-class ConditionalTerrainVAE(nn.Module):
-    """Conditional VAE with a spatial latent; generation = sampling ``z``.
+class _HeightmapHead(nn.Module):
+    """Predict a per-column surface height in [0, 1] from the latent + biome.
 
-    The latent ``z`` is a coarse 3D grid (``config.vae_latent_shape``) that the
-    decoder upsamples to full resolution. Combined with the U-Net decoder, this
-    is what lets generated terrain have hills and caves rather than flat layers.
+    This is the first 'stage': before deciding each voxel, the model commits to
+    where the surface is for each (x, z) column. The voxel decoder then receives
+    a signed-distance-to-surface channel, which removes the up/down ambiguity
+    that made the model carve out air in hilly biomes.
+    """
+
+    def __init__(self, latent_channels: int, biome_embed_dim: int, hidden: int):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(latent_channels + biome_embed_dim, hidden, 3, padding=1), nn.GELU(),
+            nn.Conv2d(hidden, hidden, 3, padding=1), nn.GELU(),
+            nn.Conv2d(hidden, 1, 1),
+        )
+
+    def forward(self, z: torch.Tensor, be2d: torch.Tensor, out_xz: tuple[int, int]) -> torch.Tensor:
+        zc = z.mean(dim=3)                              # collapse latent Y -> [B, Cz, lx, lz]
+        h = self.net(torch.cat([zc, be2d], dim=1))     # [B, 1, lx, lz]
+        h = F.interpolate(h, size=out_xz, mode="bilinear", align_corners=False)
+        return torch.sigmoid(h)                         # [B, 1, X, Z] in [0,1]
+
+
+class ConditionalTerrainVAE(nn.Module):
+    """Conditional VAE with a spatial latent and an internal heightmap stage.
+
+    The latent ``z`` is a coarse 3D grid (``config.vae_latent_shape``). The
+    decoder (1) predicts a per-column surface heightmap from ``z`` + biome, then
+    (2) fills the volume conditioned on the upsampled latent, position, biome, and
+    a signed-distance-to-surface channel. The heightmap stage lives inside the
+    graph, so generation is still a single ONNX pass with the same
+    ``(z, biome) -> logits`` interface.
     """
 
     def __init__(self, num_classes: int, num_biomes: int, config: Config):
@@ -212,7 +239,11 @@ class ConditionalTerrainVAE(nn.Module):
         self.num_classes = num_classes
         self.encoder = _Encoder(num_classes, num_biomes, config)
         self.biome_embed = nn.Embedding(num_biomes, config.biome_embed_dim)
-        in_ch = 3 + config.latent_channels + config.biome_embed_dim
+        self.height_head = _HeightmapHead(
+            config.latent_channels, config.biome_embed_dim, config.base_channels
+        )
+        # +1 channel for the signed distance to the predicted surface.
+        in_ch = 3 + config.latent_channels + config.biome_embed_dim + 1
         self.decoder = _UNetDecoder(in_ch, config.base_channels, num_classes)
 
     @staticmethod
@@ -221,22 +252,38 @@ class ConditionalTerrainVAE(nn.Module):
         return mu + std * torch.randn_like(std)
 
     def decode(
-        self, z: torch.Tensor, biome_id: torch.Tensor, shape: tuple[int, int, int]
-    ) -> torch.Tensor:
-        # z: [B, Cz, lx, ly, lz] -> upsample to full resolution and condition on it.
+        self,
+        z: torch.Tensor,
+        biome_id: torch.Tensor,
+        shape: tuple[int, int, int],
+        return_height: bool = False,
+    ):
+        # z: [B, Cz, lx, ly, lz]. Stage 1: heightmap. Stage 2: fill.
         x, y, z_dim = shape
         b = z.shape[0]
+        be = self.biome_embed(biome_id)                                  # [B, E]
+
+        # Stage 1 -- per-column surface height in [0,1].
+        be2d = be[:, :, None, None].expand(-1, -1, z.shape[2], z.shape[4])
+        height = self.height_head(z, be2d, (x, z_dim))                   # [B, 1, X, Z]
+
+        # Signed distance to surface: negative below ground, positive above.
+        y_norm = torch.linspace(0, 1, y, device=z.device).view(1, 1, 1, y, 1)
+        dist = y_norm - height.unsqueeze(3)                             # [B, 1, X, Y, Z]
+
+        # Stage 2 -- fill the volume.
         pos = coordinate_features(b, x, y, z_dim, z.device)
         zt = F.interpolate(z, size=(x, y, z_dim), mode="trilinear", align_corners=False)
-        be = self.biome_embed(biome_id)[:, :, None, None, None].expand(-1, -1, x, y, z_dim)
-        cond = torch.cat([pos, zt, be], dim=1)
-        return self.decoder(cond)
+        bev = be[:, :, None, None, None].expand(-1, -1, x, y, z_dim)
+        cond = torch.cat([pos, zt, bev, dist], dim=1)
+        logits = self.decoder(cond)
+        return (logits, height) if return_height else logits
 
     def forward(self, grid: torch.Tensor, biome_id: torch.Tensor):
         mu, logvar = self.encoder(grid, biome_id)
         z = self.reparameterize(mu, logvar)
-        logits = self.decode(z, biome_id, grid.shape[1:])
-        return logits, mu, logvar
+        logits, height = self.decode(z, biome_id, grid.shape[1:], return_height=True)
+        return logits, mu, logvar, height
 
 
 class VAEDecoderForExport(nn.Module):

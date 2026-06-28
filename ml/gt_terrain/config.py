@@ -97,6 +97,11 @@ class Config:
     beta: float = 1.0                 # KL weight (target after annealing)
     kl_anneal_epochs: int = 10        # epochs to ramp beta 0 -> beta
     free_bits: float = 0.02           # nats per latent element that incur no KL penalty
+    # The decoder predicts a per-column surface heightmap internally and feeds a
+    # signed-distance-to-surface channel to the voxel head, so it commits to a
+    # surface instead of hedging (the "digs out air" problem). This weights the
+    # heightmap supervision term during training.
+    heightmap_weight: float = 1.0
 
     # Post-processing of generated terrain (model predicts shape; we clean + scatter ores).
     clean_terrain: bool = True        # remove floating specks / fill 1-voxel pinholes (keeps caves)

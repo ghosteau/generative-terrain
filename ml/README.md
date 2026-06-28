@@ -27,8 +27,9 @@ gt_terrain/
   blocks.py     27-group block taxonomy — the single source of truth (Python + Java share it).
   data.py       CSV -> voxel grids (leakage-free, vectorised), dataset + augmentation.
   models.py     BaselineVoxelNet (deterministic floor) and ConditionalTerrainVAE
-                (generative; SPATIAL latent + U-Net decoder so terrain can have
-                hills and caves rather than flat layers).
+                (generative; SPATIAL latent + U-Net decoder, plus an internal
+                heightmap stage that predicts the per-column surface so the model
+                commits to a surface instead of carving air. Single ONNX pass.)
   train.py      Training loops (class-weighted CE; VAE adds KL annealing + free bits).
   evaluate.py   Accuracy + terrain-plausibility (vertical profiles), diversity, plots.
   generate.py   Sample chunks from the VAE; write a block-name CSV.

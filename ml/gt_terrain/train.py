@@ -22,6 +22,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, WeightedRandomSampler
 
+from gt_terrain.blocks import BlockGrouping
 from gt_terrain.config import Config
 from gt_terrain.data import IGNORE_INDEX, ChunkGridDataset, split_indices
 from gt_terrain.models import BaselineVoxelNet, ConditionalTerrainVAE
@@ -90,6 +91,15 @@ def _voxel_ce(logits: torch.Tensor, target: torch.Tensor, weight: torch.Tensor) 
     logits = logits.permute(0, 2, 3, 4, 1).reshape(-1, c)
     target = target.reshape(-1)
     return F.cross_entropy(logits, target, weight=weight, ignore_index=IGNORE_INDEX)
+
+
+def _target_heightmap(grid: torch.Tensor, air_id: int) -> torch.Tensor:
+    """True per-column surface height (normalised highest non-air local Y) -> [B,1,X,Z]."""
+    b, x, y, z = grid.shape
+    nonair = (grid != air_id) & (grid != IGNORE_INDEX)
+    yidx = torch.arange(y, device=grid.device).view(1, 1, y, 1)
+    h = torch.where(nonair, yidx, torch.zeros_like(yidx)).amax(dim=2)   # [B,X,Z]
+    return (h.float() / max(y - 1, 1)).unsqueeze(1)
 
 
 def _kl_with_free_bits(mu: torch.Tensor, logvar: torch.Tensor, free_bits: float) -> torch.Tensor:
@@ -189,6 +199,8 @@ def train_vae(
     model = ConditionalTerrainVAE(num_classes, num_biomes, config).to(device)
     weight = torch.tensor(class_weights, device=device)
     opt = torch.optim.AdamW(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
+    air_id = BlockGrouping().group_to_idx["AIR"]
+    hw = config.heightmap_weight
 
     hist = History([], [], float("inf"), -1)
     patience = 0
@@ -200,10 +212,11 @@ def train_vae(
         for grid, biome in tqdm(train_loader, desc=f"vae e{epoch+1} train", leave=False):
             grid, biome = grid.to(device), biome.to(device)
             opt.zero_grad()
-            logits, mu, logvar = model(grid, biome)
+            logits, mu, logvar, height = model(grid, biome)
             recon = _voxel_ce(logits, grid, weight)
             kl = _kl_with_free_bits(mu, logvar, config.free_bits)
-            loss = recon + beta * kl
+            hloss = F.l1_loss(height, _target_heightmap(grid, air_id))
+            loss = recon + beta * kl + hw * hloss
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
             opt.step()
@@ -215,10 +228,11 @@ def train_vae(
         with torch.no_grad():
             for grid, biome in val_loader:
                 grid, biome = grid.to(device), biome.to(device)
-                logits, mu, logvar = model(grid, biome)
+                logits, mu, logvar, height = model(grid, biome)
                 recon = _voxel_ce(logits, grid, weight)
                 kl = _kl_with_free_bits(mu, logvar, config.free_bits)
-                vl += (recon + beta * kl).item()
+                hloss = F.l1_loss(height, _target_heightmap(grid, air_id))
+                vl += (recon + beta * kl + hw * hloss).item()
         hist.val.append(vl / max(len(val_loader), 1))
         print(f"[vae] epoch {epoch+1} beta {beta:.3f} train {hist.train[-1]:.4f} val {hist.val[-1]:.4f}")
 
