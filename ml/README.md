@@ -1,44 +1,29 @@
 # GenerativeTerrain — ML pipeline
 
-Training code for the Minecraft terrain generator. Everything lives in the
-`gt_terrain` package; the notebook (`notebooks/GenerativeTerrain.ipynb`) is a
-thin driver that narrates the stages.
+See the [root README](../README.md) for the full project overview, architecture description, and deployment guide.
 
-## The core idea (read this first)
+This document covers ML-specific details: the package layout, setup, and how to run.
 
-The previous models conditioned each voxel on the **block IDs of its neighbours**
-plus `Is_Surface` and `Light_Level`. Those describe the terrain *being
-generated*, so the model only ever learned "fill a hole given its neighbours" and
-could not generate from scratch — at generation time those inputs don't exist.
-
-This pipeline conditions only on what's available **before** terrain exists:
-
-| Input            | Why it's allowed                              |
-|------------------|-----------------------------------------------|
-| position (x,y,z) | known a priori; height `y` is the key signal  |
-| chunk biome      | chosen before generating                      |
-| latent noise `z` | the source of variety (generative model only) |
-
-## Layout
+## Package layout
 
 ```
 gt_terrain/
-  config.py     Paths + hyper-parameters (env-overridable). Config.tiny() for CPU dry-runs.
-  blocks.py     27-group block taxonomy — the single source of truth (Python + Java share it).
-  data.py       CSV -> voxel grids (leakage-free, vectorised), dataset + augmentation.
-  models.py     BaselineVoxelNet (deterministic floor) and ConditionalTerrainVAE
-                (generative; SPATIAL latent + U-Net decoder, plus an internal
-                heightmap stage that predicts the per-column surface so the model
-                commits to a surface instead of carving air. Single ONNX pass.)
-  train.py      Training loops (class-weighted CE; VAE adds KL annealing + free bits).
-  evaluate.py   Accuracy + terrain-plausibility (vertical profiles), diversity, plots.
-  generate.py   Sample chunks from the VAE; write a block-name CSV.
-  postprocess.py  Clean speckle / fill pinholes (keeps caves) + procedural ore scatter.
-  export.py     ONNX decoder export + the JSON mappings the plugin reads.
+  config.py       Paths + hyperparameters (env-overridable). Config.tiny() for CPU dry-runs.
+  blocks.py       27-group block taxonomy — single source of truth shared with Java.
+  data.py         CSV → voxel grids (leakage-free, vectorised). Dataset + augmentation.
+  models.py       BaselineVoxelNet (deterministic floor) + ConditionalTerrainVAE.
+                  VAE has a spatial latent grid + 3D U-Net decoder + internal heightmap
+                  stage. Single ONNX forward pass: (z, biome_id) → logits.
+  train.py        Training loops. VAE uses KL annealing, free bits, and heightmap L1 loss.
+  evaluate.py     Per-group accuracy, vertical block-by-height profiles, sample diversity.
+  generate.py     Sample chunks from the trained VAE (with optional post-processing).
+  postprocess.py  Morphological cleanup (despeckle / fill pinholes) + procedural ore scatter.
+  export.py       ONNX decoder export + JSON mapping files the plugin reads.
 notebooks/
-  GenerativeTerrain.ipynb   The driver notebook.
-  legacy/                   The six superseded notebooks, kept for reference.
-tests/          pytest — includes the no-leakage invariant.
+  GenerativeTerrain.ipynb   The driver notebook. Run top to bottom.
+  legacy/                   Six superseded notebooks, kept for reference.
+tests/
+  test_data.py    pytest suite; includes the no-leakage invariant.
 ```
 
 ## Setup
@@ -48,51 +33,43 @@ tests/          pytest — includes the no-leakage invariant.
 pip install -r requirements.txt
 ```
 
-**GPU training:** `requirements.txt` pins the CPU build of torch so it installs
-anywhere. To train on your RTX 4070, install the CUDA build *instead* first:
+**GPU training (RTX 4070 or similar):** install the CUDA torch build first:
 
 ```bash
 pip install torch --index-url https://download.pytorch.org/whl/cu124
 pip install -r requirements.txt
 ```
 
-## Configure the data location
+## Configure data paths
 
-Raw chunk CSVs (from `/grabchunkdata`) are read from `Config.data_dir`, which
-defaults to the PaperMC server export folder. Override without editing code:
-
-```bash
+```powershell
 # Windows PowerShell
-$env:GT_DATA_DIR = "C:\path\to\block_dataset"
+$env:GT_DATA_DIR    = "C:\path\to\Server\block_dataset"
 $env:GT_ARTIFACT_DIR = "C:\path\to\outputs"
 ```
 
+Defaults: `GT_DATA_DIR` points at the PaperMC server export folder; `GT_ARTIFACT_DIR` is `ml/artifacts/`.
+
 ## Run
 
-* **Notebook:** open `notebooks/GenerativeTerrain.ipynb` and run top to bottom.
-* **Tests:** `python -m pytest tests/`
-* **Quick CPU sanity check:** in the notebook swap `cfg = Config()` for
-  `cfg = Config.tiny()`.
+- **Notebook:** open `notebooks/GenerativeTerrain.ipynb` and run top to bottom.
+- **CPU smoke test:** swap `cfg = Config()` for `cfg = Config.tiny()` in the notebook.
+- **Tests:** `python -m pytest tests/`
 
 ## Output → plugin
 
 The export step writes three files to `Config.artifact_dir`:
 
-* `terrain_vae_decoder.onnx`
-* `block_group_mapping.json`
-* `biome_id_mapping.json`
+```
+terrain_vae_decoder.onnx
+block_group_mapping.json
+biome_id_mapping.json
+```
 
-Copy all three into `<server>/plugins/GenerativeTerrain/`, then run
-`/generateterrain` in-game.
+Copy all three into `<server>/plugins/GenerativeTerrain/`, then run `/modelgenerateterrain` in-game.
 
-## Current limitations / next steps
+## Data limitations
 
-* **Data:** ~230 chunks today. This is the biggest constraint; the VAE is
-  data-hungry. Collect more quickly in-game with **`/grabchunkarea <radius>`**,
-  which exports a whole square of chunks at once (one CSV each).
-* **Per-chunk independence:** chunks are generated in isolation, so edges between
-  adjacent generated chunks won't line up yet.
-* **Scale with data:** raise `base_channels`, `latent_channels`, the
-  `latent_grid` resolution, and `epochs` as the dataset grows. The VAE needs
-  enough epochs to converge -- undertrained it produces speckle (stray blocks);
-  watch the vertical-profile plot to judge convergence.
+- The VAE needs a lot of data. Speckle and biome homogeneity are symptoms of too few chunks.
+- Use `/grabchunkarea <radius>` for bulk collection and `/grabbiome <biome>` for rare biomes.
+- Biomes with fewer than ~20 chunks will be undertrained regardless of sampler weights.
