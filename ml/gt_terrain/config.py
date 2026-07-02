@@ -103,6 +103,39 @@ class Config:
     # heightmap supervision term during training.
     heightmap_weight: float = 1.0
 
+    # --- Styles (the fine-tuning / transfer-learning mechanism) -------------
+    # The decoder is conditioned on a style embedding via FiLM (feature-wise
+    # scale/shift at every U-Net block and in the heightmap head). Style 0 is
+    # the vanilla base style; the remaining slots are reserved for custom
+    # styles learned later by fine-tuning on a user's own chunks -- without
+    # retraining the base. One exported model can hold several styles.
+    style_dim: int = 64               # width of a style vector
+    max_custom_styles: int = 8        # reserved trainable custom-style slots
+    # During base training, Gaussian noise of this std is added to the style
+    # vector so the FiLM response is smooth around the base style. That makes
+    # the style space well-conditioned for fine-tuning (a new style vector
+    # moves through terrain that degrades gracefully, not chaotically).
+    style_noise: float = 0.1
+    # With this probability a training chunk's biome id is replaced by the
+    # UNKNOWN biome, so the UNKNOWN row learns "generic terrain". Fine-tuning
+    # data whose biomes the base never saw maps to UNKNOWN and still works.
+    biome_dropout: float = 0.05
+
+    # --- Fine-tuning ---------------------------------------------------------
+    ft_lr: float = 1e-3               # few trainable params -> higher LR is fine
+    ft_epochs: int = 60
+    ft_patience: int = 15
+    # What to unfreeze beyond the new style row:
+    #   "style"   -- only the style embedding row (tiny; needs very similar terrain)
+    #   "film"    -- + the FiLM projections (default; adapter-sized, recommended)
+    #   "decoder" -- + the whole decoder & heightmap head (for 100+ chunk datasets)
+    ft_unfreeze: str = "film"
+
+    # Versioned-base bookkeeping: base checkpoints are written to
+    # artifact_dir/base_<base_version>/ with a manifest that fine_tune() uses
+    # to rebuild the exact architecture and mappings.
+    base_version: str = "v1"
+
     # Post-processing of generated terrain (model predicts shape; we clean + scatter ores).
     clean_terrain: bool = True        # remove floating specks / fill 1-voxel pinholes (keeps caves)
     ore_scatter: bool = True          # procedurally scatter ores into stone/deepslate
@@ -115,6 +148,9 @@ class Config:
     epochs: int = 200
     patience: int = 20                # early-stopping patience (epochs)
     grad_clip: float = 1.0
+    warmup_epochs: int = 5            # linear LR warmup, then cosine decay to ~0
+    amp: bool = True                  # mixed-precision autocast on CUDA (ignored on CPU)
+    ema_decay: float = 0.999          # EMA of weights; EMA weights are validated/exported
     num_workers: int = 0
     seed: int = 1337
 
@@ -147,10 +183,15 @@ class Config:
             latent_channels=4,
             latent_grid=(2, 4, 2),
             latent_dim=8,
+            style_dim=8,
+            max_custom_styles=2,
             batch_size=2,
             epochs=2,
             patience=2,
             kl_anneal_epochs=1,
+            warmup_epochs=1,
+            ft_epochs=2,
+            ft_patience=2,
             num_workers=0,
             device="cpu",
             augment=False,

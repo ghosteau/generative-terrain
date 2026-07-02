@@ -43,7 +43,7 @@ commands:
     permission: generativeterrain.setdatapath
     permission-message: You don't have permission to use this command.
   generateTerrain:
-    description: Generates terrain in a chunk using the ML model.
-    usage: /<command> [chunkX chunkZ]
+    description: Generates terrain in a chunk using the ML model (optionally in a fine-tuned style).
+    usage: /<command> [chunkX chunkZ] [style <name|id>]
     permission: generativeterrain.generateterrain
     permission-message: You don't have permission to use this command.

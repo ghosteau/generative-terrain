@@ -86,7 +86,7 @@ def test_grid_shape_and_dtype(tiny):
     grouping = BlockGrouping()
     grid = csv_to_grid(tiny.data_dir / "plains1.csv", grouping, tiny)
     assert grid.shape == (tiny.chunk_width, tiny.chunk_height, tiny.chunk_depth)
-    assert grid.dtype == np.int16
+    assert grid.dtype == np.int8
     # Full chunk => no ignore voxels remain.
     assert (grid == IGNORE_INDEX).sum() == 0
 

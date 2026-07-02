@@ -18,8 +18,9 @@ Everything else (the six neighbour columns, ``Is_Surface``, ``Light_Level``) is
 ignored on purpose: those describe terrain that does not exist yet at generation
 time, so feeding them to the model is leakage. See the package docstring.
 
-The whole dataset is tiny once gridded (~45 MB of int16), so we load it entirely
-into RAM as one array instead of writing thousands of per-chunk ``.pt`` files.
+The whole dataset is small once gridded (~100 KB of int8 per chunk), so we load
+it entirely into RAM as one array instead of writing thousands of per-chunk
+``.pt`` files.
 """
 
 from __future__ import annotations
@@ -43,20 +44,31 @@ IGNORE_INDEX = -1
 _USED_COLUMNS = ["x", "y", "z", "ChunkBiome", "Block_ID"]
 
 
+# Reserved biome label. It is always present in the vocabulary, and any biome
+# name the encoder has never seen maps to it. During base training a small
+# fraction of chunks is relabelled to UNKNOWN (config.biome_dropout) so its
+# embedding row learns "generic terrain" -- that way fine-tuning data from
+# custom worlds with unrecognised biomes still conditions on something trained.
+UNKNOWN_BIOME = "UNKNOWN"
+
+
 class BiomeEncoder:
     """Deterministic biome-name <-> id mapping (sorted for stability)."""
 
     def __init__(self, names: list[str]):
-        self.names = sorted(names)
+        self.names = sorted(set(names) | {UNKNOWN_BIOME})
         self.name_to_id = {n: i for i, n in enumerate(self.names)}
 
     @property
     def num_biomes(self) -> int:
         return len(self.names)
 
+    @property
+    def unknown_id(self) -> int:
+        return self.name_to_id[UNKNOWN_BIOME]
+
     def transform(self, name: str) -> int:
-        # Unknown biome -> 0; the plugin uses the same fallback.
-        return self.name_to_id.get(name, 0)
+        return self.name_to_id.get(name, self.unknown_id)
 
     def save(self, path: str | Path) -> None:
         """Write ``{BIOME_NAME: id}`` for the Java plugin to load."""
@@ -69,6 +81,25 @@ class BiomeEncoder:
             # ChunkBiome is one value for the whole chunk, so a 1-row read is enough.
             names.add(str(pd.read_csv(f, usecols=["ChunkBiome"], nrows=1)["ChunkBiome"][0]))
         return cls(sorted(names))
+
+    @classmethod
+    def from_mapping(cls, name_to_id: dict[str, int]) -> "BiomeEncoder":
+        """Rebuild from a saved ``{BIOME_NAME: id}`` mapping, preserving ids exactly.
+
+        Used by fine-tuning: the ids must match the embedding rows of the base
+        checkpoint, so we restore the mapping verbatim instead of re-deriving it.
+        """
+        enc = cls.__new__(cls)
+        enc.names = [n for n, _ in sorted(name_to_id.items(), key=lambda kv: kv[1])]
+        enc.name_to_id = dict(name_to_id)
+        if UNKNOWN_BIOME not in enc.name_to_id:
+            # Pre-style-era mapping: tolerate it, fall back to id 0 like before.
+            enc.name_to_id[UNKNOWN_BIOME] = 0
+        return enc
+
+    @classmethod
+    def load(cls, path: str | Path) -> "BiomeEncoder":
+        return cls.from_mapping(json.loads(Path(path).read_text(encoding="utf-8")))
 
 
 def list_csv_files(config: Config) -> list[Path]:
@@ -117,7 +148,7 @@ def csv_to_grid(
     grid = np.full(
         (config.chunk_width, config.chunk_height, config.chunk_depth),
         IGNORE_INDEX,
-        dtype=np.int16,
+        dtype=np.int8,          # 27 classes + the -1 sentinel fit comfortably
     )
     grid[x[in_bounds], local_y[in_bounds], z[in_bounds]] = group_ids[in_bounds]
     return grid
@@ -128,11 +159,11 @@ def build_dataset(
     grouping: BlockGrouping,
     biome_encoder: BiomeEncoder,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Grid every CSV. Returns ``(grids [N,X,Y,Z] int16, biome_ids [N] int64)``."""
+    """Grid every CSV. Returns ``(grids [N,X,Y,Z] int8, biome_ids [N] int64)``."""
     files = list_csv_files(config)
     grids = np.empty(
         (len(files), config.chunk_width, config.chunk_height, config.chunk_depth),
-        dtype=np.int16,
+        dtype=np.int8,
     )
     biome_ids = np.empty(len(files), dtype=np.int64)
 

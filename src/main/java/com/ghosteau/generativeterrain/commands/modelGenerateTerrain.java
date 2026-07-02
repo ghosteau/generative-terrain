@@ -48,8 +48,17 @@ import java.util.logging.Level;
  *   <li>{@code terrain_vae_decoder.onnx} -- the exported decoder</li>
  *   <li>{@code block_group_mapping.json} -- {@code {id: GROUP_NAME}}</li>
  *   <li>{@code biome_id_mapping.json}    -- {@code {BIOME_NAME: id}}</li>
+ *   <li>{@code style_mapping.json}       -- {@code {STYLE_NAME: id}} (optional;
+ *       BASE plus any custom styles added by fine-tuning)</li>
  * </ul>
- * All three come from the training notebook's export step.
+ * All of these come from the training notebook's export step.
+ *
+ * <h2>Styles</h2>
+ * Models trained with the style-conditioned pipeline declare a third graph
+ * input {@code style_id}. Style 0 is the vanilla base style; higher ids are
+ * custom styles fine-tuned on someone's own terrain. Select one with
+ * {@code /generateterrain style <name|id>}. Older two-input models keep
+ * working -- the plugin feeds only the inputs the graph declares.
  */
 public class modelGenerateTerrain implements CommandExecutor
 {
@@ -80,6 +89,10 @@ public class modelGenerateTerrain implements CommandExecutor
     // Mappings loaded from JSON.
     private final Map<String, Integer> biomeEncoder = new HashMap<>();   // biome name -> id
     private final Map<Integer, String> groupDecoder = new HashMap<>();   // class id -> group name
+    private final Map<String, Integer> styleEncoder = new HashMap<>();   // style name -> id
+
+    // Whether the loaded graph declares a style_id input (style-conditioned models).
+    private boolean hasStyleInput = false;
 
     private final Random random = new Random();
 
@@ -103,6 +116,17 @@ public class modelGenerateTerrain implements CommandExecutor
             File biomeFile = new File(plugin.getDataFolder(), "biome_id_mapping.json");
             biomeEncoder.putAll(loadBiomeMapping(biomeFile));
 
+            // Optional: styles (BASE + any fine-tuned custom styles).
+            File styleFile = new File(plugin.getDataFolder(), "style_mapping.json");
+            if (styleFile.exists())
+            {
+                styleEncoder.putAll(loadStyleMapping(styleFile));
+            }
+            if (styleEncoder.isEmpty())
+            {
+                styleEncoder.put("BASE", 0);
+            }
+
             OrtSession.SessionOptions sessionOptions = new OrtSession.SessionOptions();
             sessionOptions.setIntraOpNumThreads(2);
             sessionOptions.setInterOpNumThreads(2);
@@ -123,8 +147,13 @@ public class modelGenerateTerrain implements CommandExecutor
                 }
             }
 
+            // Style-conditioned graphs declare a third input; feed it only if present
+            // so older two-input exports keep working unchanged.
+            hasStyleInput = session.getInputInfo().containsKey("style_id");
+
             plugin.getLogger().info("ONNX decoder loaded. zShape=" + java.util.Arrays.toString(zShape)
-                    + ", groups=" + groupDecoder.size() + ", biomes=" + biomeEncoder.size());
+                    + ", groups=" + groupDecoder.size() + ", biomes=" + biomeEncoder.size()
+                    + ", styles=" + styleEncoder.size() + (hasStyleInput ? "" : " (graph has no style input)"));
         }
         catch (Exception e)
         {
@@ -150,6 +179,27 @@ public class modelGenerateTerrain implements CommandExecutor
             plugin.getLogger().log(Level.SEVERE, "Failed to load block group mapping", e);
         }
         plugin.getLogger().info("Loaded " + mapping.size() + " block group mappings from JSON.");
+        return mapping;
+    }
+
+    /** Loads {@code {STYLE_NAME: id}} (BASE plus fine-tuned custom styles). */
+    private Map<String, Integer> loadStyleMapping(File jsonFile)
+    {
+        Map<String, Integer> mapping = new HashMap<>();
+        try (InputStream is = new FileInputStream(jsonFile))
+        {
+            String json = new String(is.readAllBytes(), StandardCharsets.UTF_8);
+            JsonObject obj = JsonParser.parseString(json).getAsJsonObject();
+            for (String key : obj.keySet())
+            {
+                mapping.put(key, obj.get(key).getAsInt());
+            }
+        }
+        catch (IOException e)
+        {
+            plugin.getLogger().log(Level.SEVERE, "Failed to load style mapping", e);
+        }
+        plugin.getLogger().info("Loaded " + mapping.size() + " style mappings from JSON.");
         return mapping;
     }
 
@@ -223,7 +273,7 @@ public class modelGenerateTerrain implements CommandExecutor
             return true;
         }
 
-        if (args.length >= 2)
+        if (args.length >= 2 && !args[0].equalsIgnoreCase("style"))
         {
             try
             {
@@ -238,19 +288,58 @@ public class modelGenerateTerrain implements CommandExecutor
             }
         }
 
+        // Optional "style <name|id>" pair anywhere in the args (style 0 = BASE).
+        int styleId = 0;
+        String styleName = "BASE";
+        for (int i = 0; i + 1 < args.length; i++)
+        {
+            if (!args[i].equalsIgnoreCase("style")) continue;
+
+            String value = args[i + 1];
+            Integer mapped = null;
+            for (Map.Entry<String, Integer> e : styleEncoder.entrySet())
+            {
+                if (e.getKey().equalsIgnoreCase(value))
+                {
+                    mapped = e.getValue();
+                    break;
+                }
+            }
+            if (mapped == null)
+            {
+                try { mapped = Integer.parseInt(value); }
+                catch (NumberFormatException ignored) { }
+            }
+            if (mapped == null)
+            {
+                player.sendMessage(ChatColor.RED + "Unknown style '" + value +
+                        "'. Available: " + String.join(", ", styleEncoder.keySet()));
+                return true;
+            }
+            styleId = mapped;
+            styleName = value;
+            break;
+        }
+        if (styleId != 0 && !hasStyleInput)
+        {
+            player.sendMessage(ChatColor.YELLOW + "This model has no style input; generating with the base style.");
+            styleId = 0;
+        }
+
         generationTasks.put(playerUUID, new AtomicBoolean(true));
 
         player.sendMessage(ChatColor.GREEN + "Starting terrain generation for chunk: " +
                 chunk.getX() + ", " + chunk.getZ() +
-                (fromArgs ? "" : " (your current position)"));
+                (fromArgs ? "" : " (your current position)") +
+                (styleId != 0 ? (" in style '" + styleName + "'") : ""));
         player.sendMessage(ChatColor.GRAY + "Type /generateterrain cancel to stop the generation.");
 
         // Start the async process
-        startTerrainGeneration(chunk, player);
+        startTerrainGeneration(chunk, player, styleId);
         return true;
     }
 
-    private void startTerrainGeneration(Chunk chunk, Player player)
+    private void startTerrainGeneration(Chunk chunk, Player player, int styleId)
     {
         final UUID playerUUID = player.getUniqueId();
 
@@ -264,7 +353,7 @@ public class modelGenerateTerrain implements CommandExecutor
                 final String chunkBiomeName = getChunkBiome(chunk);
 
                 player.sendMessage(ChatColor.AQUA + "Running AI model inference...");
-                int[][][] groupGrid = runModelInference(chunkBiomeName, player);
+                int[][][] groupGrid = runModelInference(chunkBiomeName, styleId, player);
 
                 if (!generationTasks.get(playerUUID).get() || groupGrid == null) return;
 
@@ -286,18 +375,23 @@ public class modelGenerateTerrain implements CommandExecutor
      *
      * @return a [X][Y][Z] grid of block-group ids, or {@code null} on failure.
      */
-    private int[][][] runModelInference(String chunkBiomeName, Player player)
+    private int[][][] runModelInference(String chunkBiomeName, int styleId, Player player)
     {
-        // Inputs: a fresh latent (one N(0,1) value per element) and the chunk's biome id.
+        // Inputs: a fresh latent (one N(0,1) value per element), the chunk's biome id,
+        // and -- for style-conditioned models -- the requested style id.
         long zCount = 1;
         for (long d : zShape) zCount *= d;
         FloatBuffer zBuffer = FloatBuffer.allocate((int) zCount);
         for (int i = 0; i < zCount; i++) zBuffer.put((float) random.nextGaussian());
         zBuffer.flip();
-        long[] biomeData = new long[]{ biomeEncoder.getOrDefault(chunkBiomeName, 0) };
+        // Unrecognised biomes fall back to the UNKNOWN row (trained on generic
+        // terrain via biome dropout); pre-style mappings fall back to id 0.
+        long[] biomeData = new long[]{ biomeEncoder.getOrDefault(chunkBiomeName,
+                biomeEncoder.getOrDefault("UNKNOWN", 0)) };
 
         OnnxTensor zTensor = null;
         OnnxTensor biomeTensor = null;
+        OnnxTensor styleTensor = null;
         OrtSession.Result result = null;
         try
         {
@@ -307,6 +401,11 @@ public class modelGenerateTerrain implements CommandExecutor
             Map<String, OnnxTensor> inputs = new HashMap<>();
             inputs.put("z", zTensor);
             inputs.put("biome_id", biomeTensor);
+            if (hasStyleInput)
+            {
+                styleTensor = OnnxTensor.createTensor(env, new long[]{ styleId });
+                inputs.put("style_id", styleTensor);
+            }
 
             result = session.run(inputs);
 
@@ -351,6 +450,7 @@ public class modelGenerateTerrain implements CommandExecutor
         {
             if (zTensor != null) zTensor.close();
             if (biomeTensor != null) biomeTensor.close();
+            if (styleTensor != null) styleTensor.close();
             if (result != null) result.close();
         }
     }

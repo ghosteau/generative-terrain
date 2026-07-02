@@ -31,11 +31,15 @@ def sample_grids(
     postprocess: bool = True,
     grouping: BlockGrouping | None = None,
     rng: np.random.Generator | None = None,
+    style_id: int = 0,
 ) -> np.ndarray:
-    """Sample ``n`` chunks for one biome. Returns group-id grids ``[n,X,Y,Z]``.
+    """Sample ``n`` chunks for one biome (and style). Returns group-id grids ``[n,X,Y,Z]``.
 
     ``temperature`` scales the prior std: 1.0 matches training; <1 yields more
     typical (smoother) terrain, >1 more varied/risky terrain.
+
+    ``style_id`` selects the terrain style: 0 is the vanilla base style, higher
+    ids are custom styles added by ``train.fine_tune`` (see style_mapping.json).
 
     With ``postprocess`` (default), each sample is cleaned (despeckle / fill
     pinholes) and has ores scattered in -- the same steps the plugin applies in
@@ -47,7 +51,8 @@ def sample_grids(
 
     z = torch.randn(n, *config.vae_latent_shape, device=device) * temperature
     biome = torch.full((n,), int(biome_id), dtype=torch.long, device=device)
-    logits = vae.decode(z, biome, shape)              # [n, C, X, Y, Z]
+    style = torch.full((n,), int(style_id), dtype=torch.long, device=device)
+    logits = vae.decode(z, biome, shape, style_id=style)   # [n, C, X, Y, Z]
     preds = logits.argmax(dim=1).cpu().numpy().astype(np.int16)
 
     if postprocess:
