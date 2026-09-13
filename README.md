@@ -153,18 +153,9 @@ All collection commands export one CSV per chunk to `GT_DATA_DIR`. Run these in-
 
 **Biome-targeted collection** is important because the dataset is heavily imbalanced. Common biomes (FOREST, PLAINS, DARK_FOREST) can accumulate thousands of chunks naturally. Rare biomes (TAIGA, SAVANNA, FLOWER_FOREST) may appear only once or twice. Use `/grabbiome` to actively over-sample them:
 
-```
-/grabbiome taiga 20
-/grabbiome savanna 20
-/grabbiome flower_forest 20
-/grabbiome desert 20
-```
-
-The sampler (`config.balance_biomes = True`) applies inverse-frequency weights at training time so rare biomes aren't drowned out even if they have fewer files — but more data is always better.
-
----
-
-## Training
+- Training notebooks are provided in this repository.
+- Data was extracted directly from Minecraft using a custom `/grabchunkdata` and `/setdatapath`command (also included in the plugin if you want to use it on your own!).
+- A full dataset will be uploaded to Kaggle and/or Hugging Face along with the models when the project is finalized.
 
 Open `ml/notebooks/GenerativeTerrain.ipynb` and run top to bottom. The notebook:
 
