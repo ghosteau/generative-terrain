@@ -7,7 +7,7 @@ description: A plugin for chunk data harvesting and generating AI-based terrain 
 
 permissions:
   generativeterrain.grabchunkdata:
-    description: Allows the player to grab chunk data
+    description: Allows the player to grab chunk data (single chunk and bulk area)
     default: op
   generativeterrain.setdatapath:
     description: Allows the player to set the data path
@@ -22,13 +22,28 @@ commands:
     usage: /<command>
     permission: generativeterrain.grabchunkdata
     permission-message: You don't have permission to use this command.
+  grabChunkArea:
+    description: Bulk-exports every chunk in a square radius (in chunks) around you, one CSV per chunk.
+    usage: /<command> [radius]
+    permission: generativeterrain.grabchunkdata
+    permission-message: You don't have permission to use this command.
+  grabBiome:
+    description: Searches outward and exports chunks of a specific (rare) biome.
+    usage: /<command> <biome> [count] [searchRadius]
+    permission: generativeterrain.grabchunkdata
+    permission-message: You don't have permission to use this command.
+  grabBlock:
+    description: Searches outward and exports chunks containing a specific block.
+    usage: /<command> <block> [count] [searchRadius] [minPerChunk]
+    permission: generativeterrain.grabchunkdata
+    permission-message: You don't have permission to use this command.
   setDataPath:
     description: Sets the path in which you want to export chunk CSV data to via grabChunkData command.
     usage: /<command> <path>
     permission: generativeterrain.setdatapath
     permission-message: You don't have permission to use this command.
   generateTerrain:
-    description: Generates terrain in a chunk using the ML model.
-    usage: /<command> [chunkX chunkZ]
+    description: Generates terrain in a chunk using the ML model (optionally in a fine-tuned style).
+    usage: /<command> [chunkX chunkZ] [style <name|id>]
     permission: generativeterrain.generateterrain
     permission-message: You don't have permission to use this command.
